@@ -43,6 +43,14 @@ impl zed::Extension for IntelliJServerExtension {
                     .get_or_insert_with(IntelliJServer::new);
                 let binary_path = intellij_server.language_server_binary_path(language_server_id)?;
 
+                // Per-project overrides from `lsp.intellij-server` in settings.json:
+                // `settings.proxy_path` (proxy binary) and `settings.vm_options`
+                // (JVM flags for the server, see `java_options`).
+                let configuration =
+                    LspSettings::for_worktree(language_server_id.as_ref(), worktree)
+                        .ok()
+                        .and_then(|lsp_settings| lsp_settings.settings);
+
                 // JetBrains intellij-server ("Java and Kotlin by IntelliJ IDEA"):
                 // serves Java AND Kotlin buffers from the same engine and project
                 // model. The launcher enforces the bundled EULA before the LSP
@@ -57,10 +65,7 @@ impl zed::Extension for IntelliJServerExtension {
                     // JB_MAVEN_JAVA_HOME system property first (same mechanism as
                     // kotlin-lsp; IJ_JAVA_OPTIONS is honored by the JetBrains
                     // launcher and passed as a JVM arg).
-                    (
-                        "IJ_JAVA_OPTIONS".to_string(),
-                        format!("-DJB_MAVEN_JAVA_HOME={DEFAULT_JAVA_HOME}"),
-                    ),
+                    ("IJ_JAVA_OPTIONS".to_string(), java_options(&configuration)),
                 ];
 
                 // Run intellij-server behind kotlin-lsp-proxy, which rewrites
@@ -70,11 +75,6 @@ impl zed::Extension for IntelliJServerExtension {
                 // fall back to launching intellij-server directly so core
                 // language features keep working (only library source navigation
                 // is affected).
-                let configuration =
-                    LspSettings::for_worktree(language_server_id.as_ref(), worktree)
-                        .ok()
-                        .and_then(|lsp_settings| lsp_settings.settings);
-
                 let proxy = self.proxy.get_or_insert_with(Proxy::new);
                 match proxy.language_server_binary_path(&configuration, worktree) {
                     Ok(Some(proxy_path)) => {
@@ -232,6 +232,41 @@ impl zed::Extension for IntelliJServerExtension {
             },
         })
     }
+}
+
+/// `IJ_JAVA_OPTIONS` for the intellij-server launcher.
+///
+/// Always pins `JB_MAVEN_JAVA_HOME` so the server's Maven import forks resolve
+/// the same JDK (see `language_server_command`), then appends
+/// `lsp.intellij-server.settings.vm_options` from settings.json — a list of JVM
+/// flags used to tune the server without editing the extracted distribution's
+/// `bin/intellij-server.vmoptions`. That file pins `-Xmx2048m` and
+/// `-XX:CICompilerCount=2`, which is modest for large projects and machines with
+/// many cores, e.g.:
+///
+/// ```json
+/// { "lsp": { "intellij-server": { "settings": { "vm_options": [
+///     "-Xmx4g", "-XX:CICompilerCount=4"
+/// ] } } } }
+/// ```
+///
+/// Leaving `vm_options` unset keeps the upstream defaults untouched — any
+/// change to heap/GC/JIT settings should follow measurement, not guesswork.
+///
+/// The launcher passes these as JVM arguments. Whether a flag that also appears
+/// in the vmoptions file overrides it or not has not been verified here — confirm
+/// with `jcmd <pid> VM.flags` after changing one that matters.
+fn java_options(configuration: &Option<serde_json::Value>) -> String {
+    let mut options = format!("-DJB_MAVEN_JAVA_HOME={DEFAULT_JAVA_HOME}");
+    let vm_options = configuration
+        .as_ref()
+        .and_then(|settings| settings.pointer("/vm_options"))
+        .and_then(|value| value.as_array());
+    for option in vm_options.into_iter().flatten().filter_map(|v| v.as_str()) {
+        options.push(' ');
+        options.push_str(option);
+    }
+    options
 }
 
 zed::register_extension!(IntelliJServerExtension);

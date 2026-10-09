@@ -18,7 +18,7 @@ mod lsp;
 mod platform;
 mod resolve;
 
-use lsp::{parse_lsp_content, raw_has_id, write_raw, write_to_stdout, LspReader};
+use lsp::{parse_lsp_content, parse_lsp_id, raw_has_id, write_raw, write_to_stdout, LspReader};
 use platform::spawn_parent_monitor;
 use resolve::rewrite_archive_locations;
 use serde_json::Value;
@@ -149,24 +149,43 @@ fn main() {
                         continue;
                     }
 
-                    let Some(mut msg) = parse_lsp_content(&raw) else {
+                    // The id alone decides what to do with a response; only
+                    // parse the (potentially huge) body in the rare cases that
+                    // actually need it, so completion payloads are forwarded
+                    // byte-for-byte.
+                    let Some(id) = parse_lsp_id(&raw) else {
                         write_raw(&mut io::stdout().lock(), &raw);
                         continue;
                     };
 
                     // Responses to control-channel requests never reach Zed.
-                    if let Some(hub) = hub_slot_out.lock().unwrap().as_ref() {
-                        if hub.intercept_response(&msg) {
-                            continue;
+                    if id
+                        .as_i64()
+                        .is_some_and(|n| n >= control::CTRL_ID_BASE)
+                    {
+                        if let Some(hub) = hub_slot_out.lock().unwrap().as_ref() {
+                            if let Some(msg) = parse_lsp_content(&raw) {
+                                if hub.intercept_response(&msg) {
+                                    continue;
+                                }
+                            }
                         }
+                        write_raw(&mut io::stdout().lock(), &raw);
+                        continue;
                     }
 
-                    let is_tracked = msg
-                        .get("id")
-                        .map(|id| tracked_out.lock().unwrap().remove(id))
-                        .unwrap_or(false);
+                    // Only definition-family responses may carry archive
+                    // (`jar!/`) location URIs; everything else is passed through.
+                    if !tracked_out.lock().unwrap().remove(&id) {
+                        write_raw(&mut io::stdout().lock(), &raw);
+                        continue;
+                    }
 
-                    if is_tracked && rewrite_archive_locations(&mut msg) {
+                    let Some(mut msg) = parse_lsp_content(&raw) else {
+                        write_raw(&mut io::stdout().lock(), &raw);
+                        continue;
+                    };
+                    if rewrite_archive_locations(&mut msg) {
                         write_to_stdout(&msg);
                     } else {
                         write_raw(&mut io::stdout().lock(), &raw);

@@ -31,5 +31,8 @@ windows-sys = { version = "0.59", features = [
 
 [profile.release]
 strip = true
-opt-level = "z"
+# This binary sits on the completion/definition latency path; size is irrelevant
+# (it is a machine-local dev override, not a distributed asset), so optimize for
+# speed rather than size.
+opt-level = 3
 lto = true

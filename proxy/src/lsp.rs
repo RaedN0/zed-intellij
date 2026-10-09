@@ -1,7 +1,8 @@
 //! Minimal LSP stdio framing (Content-Length headers + JSON body).
 //! Adapted from the `zed-extensions/java` LSP proxy.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::io::{self, Read, Write};
 
 pub const CONTENT_LENGTH: &str = "Content-Length";
@@ -55,6 +56,27 @@ impl<R: Read> LspReader<R> {
 pub fn parse_lsp_content(raw: &[u8]) -> Option<serde_json::Value> {
     let sep_pos = raw.windows(4).position(|w| w == HEADER_SEP)?;
     serde_json::from_slice(&raw[sep_pos + 4..]).ok()
+}
+
+/// Deserialize target that captures only the top-level `id`.
+#[derive(Deserialize)]
+struct IdOnly {
+    id: Option<Value>,
+}
+
+/// Parse just the top-level `id` of a message body.
+///
+/// Unlike [`parse_lsp_content`] this never builds a `Value` tree for the rest of
+/// the message: unknown fields are skipped allocation-free. The proxy only ever
+/// needs the `id` to decide whether a response may carry archive (`jar!/`)
+/// locations or belongs to the control channel — for anything else (notably the
+/// often-large `textDocument/completion` results) the raw bytes are forwarded
+/// untouched, so a full parse is wasted work on the latency-critical path.
+///
+/// Returns `None` for notifications (no `id`) and unparseable bodies.
+pub fn parse_lsp_id(raw: &[u8]) -> Option<Value> {
+    let sep_pos = raw.windows(4).position(|w| w == HEADER_SEP)?;
+    serde_json::from_slice::<IdOnly>(&raw[sep_pos + 4..]).ok()?.id
 }
 
 /// Cheap check for the presence of an `"id"` key in the JSON body of a raw LSP
