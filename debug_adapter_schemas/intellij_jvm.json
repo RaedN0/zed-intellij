@@ -1,0 +1,101 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "intellij_jvm — the IntelliJ JVM debugger embedded in intellij-server",
+  "type": "object",
+  "oneOf": [
+    {
+      "title": "Launch",
+      "type": "object",
+      "properties": {
+        "request": {
+          "type": "string",
+          "const": "launch",
+          "description": "Start a new JVM under the IntelliJ debug engine."
+        },
+        "mainClass": {
+          "type": "string",
+          "description": "Fully-qualified name of the class with the main method. intellij-server resolves classpath, module path, working directory and the java executable from its imported project model."
+        },
+        "file": {
+          "type": "string",
+          "description": "Path to the source file declaring the main class; disambiguates multiple classes with the same fully-qualified name."
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Program arguments passed to main(String[])."
+        },
+        "vmArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "JVM arguments."
+        },
+        "classPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Class path override; empty = server-resolved from the project model."
+        },
+        "modulePaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "JPMS module path override; empty = server-resolved."
+        },
+        "moduleName": {
+          "type": "string",
+          "description": "JPMS module owning the main class (server-resolved when omitted)."
+        },
+        "javaExec": {
+          "type": "string",
+          "description": "java executable override; empty = project JDK."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory of the debuggee ($ZED_WORKTREE_ROOT or server-resolved module dir)."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Extra environment variables for the debuggee."
+        },
+        "console": {
+          "type": "string",
+          "enum": ["internalConsole", "integratedTerminal", "externalTerminal", "none"],
+          "description": "internalConsole (default): the server spawns the process and streams output to the Debug console."
+        },
+        "stopOnEntry": {
+          "type": "boolean",
+          "description": "Suspend immediately after the JVM starts."
+        },
+        "noDebug": {
+          "type": "boolean",
+          "description": "true = run without the debugger attached (i.e. RUN)."
+        }
+      },
+      "required": ["mainClass"]
+    },
+    {
+      "title": "Attach",
+      "type": "object",
+      "properties": {
+        "request": {
+          "type": "string",
+          "const": "attach",
+          "description": "Attach to a JVM already listening on JDWP."
+        },
+        "hostName": {
+          "type": "string",
+          "description": "Host the JDWP socket listens on. Default: localhost."
+        },
+        "port": {
+          "type": "number",
+          "description": "The JDWP port of the target JVM, e.g. 5005 with -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
+        },
+        "timeout": {
+          "type": "number",
+          "description": "Connection timeout in milliseconds. Default: 30000."
+        }
+      },
+      "required": ["port"]
+    }
+  ]
+}

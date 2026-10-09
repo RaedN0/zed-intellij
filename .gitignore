@@ -1,0 +1,11 @@
+# Rust build artifacts
+target/
+
+# Zed extension build output
+*.wasm
+
+# Local dev-seeded binaries (built from proxy/ and bridge/)
+bin/
+
+# macOS
+.DS_Store
