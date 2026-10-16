@@ -3,6 +3,8 @@ name = "intellij-dap-bridge"
 version = "0.1.0"
 edition = "2021"
 
+license = "MIT"
+
 [[bin]]
 name = "intellij-dap-bridge"
 path = "src/main.rs"
