@@ -49,10 +49,10 @@ reinstalls (which wipe `bin/`) self-heal by re-downloading.
 - `JAVA_HOME` / JDK resolution (used for the server's `JAVA_HOME`, its Maven
   import forks via `JB_MAVEN_JAVA_HOME`, and `defaultSdk`):
   1. `lsp.intellij-server.settings.java_home` per project,
-  2. `$JAVA_HOME` from your shell environment,
-  3. fallback: the author's sdkman path (`DEFAULT_JAVA_HOME` in `src/lib.rs`) —
-     on machines where it doesn't exist, configure 1 or 2 or the server's
-     Maven forks fall back to `/usr/bin/java`.
+  2. `$JAVA_HOME` from your shell environment.
+
+  When neither is configured the server falls back to its own JVM discovery
+  (`/usr/bin/java`).
 - `lsp.intellij-server.settings.vm_options` tunes server JVM flags;
   `lsp.intellij-server.settings.proxy_path` overrides the proxy binary.
 

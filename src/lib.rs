@@ -6,37 +6,29 @@ mod language_servers;
 
 use language_servers::{IntelliJServer, Proxy, util};
 
-// NOTE (personal machine): baked so that intellij-server works with zero
-// per-project configuration — GUI-launched Zed has no JAVA_HOME, and without
-// it the server's Maven import forks fall back to /usr/bin/java (Java 1.8!).
-// A project's `.zed/settings.json` (`lsp.intellij-server.binary.env`) still
-// overrides this if present.
-pub const DEFAULT_JAVA_HOME: &str = "/Users/mschoerghuber/.sdkman/candidates/java/current";
-
 /// Resolve the JDK home for this worktree, in priority order:
 ///
 /// 1. `lsp.intellij-server.settings.java_home` — per-project override,
 /// 2. `$JAVA_HOME` from the worktree's shell environment (set by login shells,
-///    sdkman, IDE wrappers, …),
-/// 3. [`DEFAULT_JAVA_HOME`] — last resort, the author's sdkman path. On
-///    machines where that path doesn't exist the server's own JVM discovery
-///    applies and its Maven import forks fall back to `/usr/bin/java`; point
-///    1 or 2 is then required for correct Java version resolution.
+///    sdkman, IDE wrappers, …).
 ///
 /// The extension sandbox can't stat absolute paths (WASI preopens only the
 /// work dir), so existence is not verified here — the launcher resolves the
 /// path in the real filesystem and reports errors itself.
+///
+/// Errors when neither source is configured, rather than silently letting the
+/// server's Maven import forks fall back to `/usr/bin/java`.
 fn resolve_java_home(
     configuration: &Option<serde_json::Value>,
     worktree: &zed::Worktree,
-) -> String {
+) -> Result<String> {
     if let Some(home) = configuration
         .as_ref()
         .and_then(|settings| settings.pointer("/java_home"))
         .and_then(|value| value.as_str())
         .filter(|home| !home.is_empty())
     {
-        return home.to_string();
+        return Ok(home.to_string());
     }
     if let Some((_, home)) = worktree
         .shell_env()
@@ -44,9 +36,13 @@ fn resolve_java_home(
         .find(|(key, _)| key == "JAVA_HOME")
         .filter(|(_, home)| !home.is_empty())
     {
-        return home;
+        return Ok(home);
     }
-    DEFAULT_JAVA_HOME.to_string()
+    Err(
+        "JAVA_HOME must be configured via lsp.intellij-server.settings.java_home or the \
+         environment"
+            .to_string(),
+    )
 }
 
 /// The adapter id intellij-server's debugger lookup expects — also the name
@@ -92,7 +88,7 @@ impl zed::Extension for IntelliJServerExtension {
                 // model. The launcher enforces the bundled EULA before the LSP
                 // handshake; `--eula=<sha256(EULA.txt)[:16]>` records acceptance
                 // for this user+machine. Telemetry stays off.
-                let java_home = resolve_java_home(&configuration, worktree);
+                let java_home = resolve_java_home(&configuration, worktree)?;
                 let env = vec![
                     ("JAVA_HOME".to_string(), java_home.clone()),
                     ("INTELLIJ_DATA_SHARING".to_string(), "none".to_string()),
@@ -166,16 +162,15 @@ impl zed::Extension for IntelliJServerExtension {
     ) -> Result<Option<serde_json::Value>> {
         match language_server_id.as_ref() {
             IntelliJServer::LANGUAGE_SERVER_ID => {
-                // Same motivation as DEFAULT_JAVA_HOME: without an SDK the
-                // analyzer can't resolve JDK symbols. Same resolution order as
-                // the launcher env (per-project `java_home`, shell env,
-                // DEFAULT_JAVA_HOME); `lsp.intellij-server.initialization_options`
-                // still overrides wholesale.
+                // Without an SDK the analyzer can't resolve JDK symbols. Same
+                // resolution order as the launcher env (per-project `java_home`,
+                // shell env); `lsp.intellij-server.initialization_options` still
+                // overrides wholesale.
                 let configuration = LspSettings::for_worktree(language_server_id.as_ref(), worktree)
                     .ok()
                     .and_then(|lsp_settings| lsp_settings.settings);
                 Ok(Some(serde_json::json!({
-                    "defaultSdk": resolve_java_home(&configuration, worktree),
+                    "defaultSdk": resolve_java_home(&configuration, worktree)?,
                 })))
             }
             _ => Ok(None),
