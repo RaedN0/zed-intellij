@@ -46,10 +46,13 @@ reinstalls (which wipe `bin/`) self-heal by re-downloading.
 - The server distribution is downloaded at runtime from JetBrains. Since 1.0
   (2026-10) it is stable but **requires an IntelliJ IDEA Ultimate license**
   after a 30-day trial (enforced by the launcher, like the EULA).
-- `JAVA_HOME`: this repo hardcodes a personal machine's path
-  (`DEFAULT_JAVA_HOME` in `src/lib.rs`) so it works with zero per-project
-  configuration; override per project via `lsp.intellij-server.binary.env`, and
-  change the constant for other machines.
+- `JAVA_HOME` / JDK resolution (used for the server's `JAVA_HOME`, its Maven
+  import forks via `JB_MAVEN_JAVA_HOME`, and `defaultSdk`):
+  1. `lsp.intellij-server.settings.java_home` per project,
+  2. `$JAVA_HOME` from your shell environment,
+  3. fallback: the author's sdkman path (`DEFAULT_JAVA_HOME` in `src/lib.rs`) —
+     on machines where it doesn't exist, configure 1 or 2 or the server's
+     Maven forks fall back to `/usr/bin/java`.
 - `lsp.intellij-server.settings.vm_options` tunes server JVM flags;
   `lsp.intellij-server.settings.proxy_path` overrides the proxy binary.
 

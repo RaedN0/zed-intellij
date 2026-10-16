@@ -13,6 +13,42 @@ use language_servers::{IntelliJServer, Proxy, util};
 // overrides this if present.
 pub const DEFAULT_JAVA_HOME: &str = "/Users/mschoerghuber/.sdkman/candidates/java/current";
 
+/// Resolve the JDK home for this worktree, in priority order:
+///
+/// 1. `lsp.intellij-server.settings.java_home` — per-project override,
+/// 2. `$JAVA_HOME` from the worktree's shell environment (set by login shells,
+///    sdkman, IDE wrappers, …),
+/// 3. [`DEFAULT_JAVA_HOME`] — last resort, the author's sdkman path. On
+///    machines where that path doesn't exist the server's own JVM discovery
+///    applies and its Maven import forks fall back to `/usr/bin/java`; point
+///    1 or 2 is then required for correct Java version resolution.
+///
+/// The extension sandbox can't stat absolute paths (WASI preopens only the
+/// work dir), so existence is not verified here — the launcher resolves the
+/// path in the real filesystem and reports errors itself.
+fn resolve_java_home(
+    configuration: &Option<serde_json::Value>,
+    worktree: &zed::Worktree,
+) -> String {
+    if let Some(home) = configuration
+        .as_ref()
+        .and_then(|settings| settings.pointer("/java_home"))
+        .and_then(|value| value.as_str())
+        .filter(|home| !home.is_empty())
+    {
+        return home.to_string();
+    }
+    if let Some((_, home)) = worktree
+        .shell_env()
+        .into_iter()
+        .find(|(key, _)| key == "JAVA_HOME")
+        .filter(|(_, home)| !home.is_empty())
+    {
+        return home;
+    }
+    DEFAULT_JAVA_HOME.to_string()
+}
+
 /// The adapter id intellij-server's debugger lookup expects — also the name
 /// registered under [debug_adapters] in extension.toml and used as the
 /// `adapter` field of debug configurations in .zed/debug.json.
@@ -56,8 +92,9 @@ impl zed::Extension for IntelliJServerExtension {
                 // model. The launcher enforces the bundled EULA before the LSP
                 // handshake; `--eula=<sha256(EULA.txt)[:16]>` records acceptance
                 // for this user+machine. Telemetry stays off.
+                let java_home = resolve_java_home(&configuration, worktree);
                 let env = vec![
-                    ("JAVA_HOME".to_string(), DEFAULT_JAVA_HOME.to_string()),
+                    ("JAVA_HOME".to_string(), java_home.clone()),
                     ("INTELLIJ_DATA_SHARING".to_string(), "none".to_string()),
                     // The server's Maven import forks do NOT reliably inherit this
                     // process's env (GUI-launched Zed has no JAVA_HOME anyway) —
@@ -65,7 +102,7 @@ impl zed::Extension for IntelliJServerExtension {
                     // JB_MAVEN_JAVA_HOME system property first (same mechanism as
                     // kotlin-lsp; IJ_JAVA_OPTIONS is honored by the JetBrains
                     // launcher and passed as a JVM arg).
-                    ("IJ_JAVA_OPTIONS".to_string(), java_options(&configuration)),
+                    ("IJ_JAVA_OPTIONS".to_string(), java_options(&configuration, &java_home)),
                 ];
 
                 // Run intellij-server behind kotlin-lsp-proxy, which rewrites
@@ -125,15 +162,22 @@ impl zed::Extension for IntelliJServerExtension {
     fn language_server_initialization_options(
         &mut self,
         language_server_id: &LanguageServerId,
-        _worktree: &zed::Worktree,
+        worktree: &zed::Worktree,
     ) -> Result<Option<serde_json::Value>> {
         match language_server_id.as_ref() {
-            IntelliJServer::LANGUAGE_SERVER_ID => Ok(Some(serde_json::json!({
+            IntelliJServer::LANGUAGE_SERVER_ID => {
                 // Same motivation as DEFAULT_JAVA_HOME: without an SDK the
-                // analyzer can't resolve JDK symbols. Per-project settings
-                // (`lsp.intellij-server.initialization_options`) override this.
-                "defaultSdk": DEFAULT_JAVA_HOME,
-            }))),
+                // analyzer can't resolve JDK symbols. Same resolution order as
+                // the launcher env (per-project `java_home`, shell env,
+                // DEFAULT_JAVA_HOME); `lsp.intellij-server.initialization_options`
+                // still overrides wholesale.
+                let configuration = LspSettings::for_worktree(language_server_id.as_ref(), worktree)
+                    .ok()
+                    .and_then(|lsp_settings| lsp_settings.settings);
+                Ok(Some(serde_json::json!({
+                    "defaultSdk": resolve_java_home(&configuration, worktree),
+                })))
+            }
             _ => Ok(None),
         }
     }
@@ -237,8 +281,9 @@ impl zed::Extension for IntelliJServerExtension {
 
 /// `IJ_JAVA_OPTIONS` for the intellij-server launcher.
 ///
-/// Always pins `JB_MAVEN_JAVA_HOME` so the server's Maven import forks resolve
-/// the same JDK (see `language_server_command`), then appends
+/// Always pins `JB_MAVEN_JAVA_HOME` (the resolved `java_home`, see
+/// [`resolve_java_home`]) so the server's Maven import forks resolve the same
+/// JDK, then appends
 /// `lsp.intellij-server.settings.vm_options` from settings.json — a list of JVM
 /// flags used to tune the server without editing the extracted distribution's
 /// `bin/intellij-server.vmoptions`. That file pins `-Xmx2048m` and
@@ -257,8 +302,8 @@ impl zed::Extension for IntelliJServerExtension {
 /// The launcher passes these as JVM arguments. Whether a flag that also appears
 /// in the vmoptions file overrides it or not has not been verified here — confirm
 /// with `jcmd <pid> VM.flags` after changing one that matters.
-fn java_options(configuration: &Option<serde_json::Value>) -> String {
-    let mut options = format!("-DJB_MAVEN_JAVA_HOME={DEFAULT_JAVA_HOME}");
+fn java_options(configuration: &Option<serde_json::Value>, java_home: &str) -> String {
+    let mut options = format!("-DJB_MAVEN_JAVA_HOME={java_home}");
     let vm_options = configuration
         .as_ref()
         .and_then(|settings| settings.pointer("/vm_options"))
