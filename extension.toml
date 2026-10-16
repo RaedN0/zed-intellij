@@ -9,20 +9,28 @@ authors = ["mschoerghuber"]
 # Grammars themselves come from the official `kotlin`/`java` extensions; only
 # install this alongside them.
 #
-# NOTE (EAP): the upstream server is EAP-quality, builds expire ~30 days after
-# release, and JetBrains will require an IDEA Ultimate license after 1.0.
+# NOTE (1.0, 2026-10): the upstream server is stable now — "Java and Kotlin by
+# IntelliJ IDEA" 1.0 (build 263.7084.0, product version 2026.3). EAP builds no
+# longer expire; instead the server requires an IDEA Ultimate license after a
+# 30-day trial (enforced by the launcher like the EULA).
 [language_servers.intellij-server]
 name = "IntelliJ Server"
 languages = ["Kotlin", "Java"]
 
 # The IntelliJ debug engine intellij-server embeds behind its
 # start_debug_server LSP command. Zed side, this adapter is just a bridge
-# process (bin/intellij-dap-bridge) pumping DAP between Zed and the TCP
+# process (intellij-dap-bridge) pumping DAP between Zed and the TCP
 # endpoint the proxy asks the server to open. Debug configs in
 # .zed/debug.json use adapter = "intellij_jvm" — the id the server's own
 # debugger lookup expects (the same string VS Code uses as the debug type).
-# Seeded binaries (wiped by dev reinstall, re-copy afterwards!):
-#   bin/intellij-lsp-proxy      (built from proxy/ in this repo)
-#   bin/intellij-dap-bridge     (built from bridge/ in this repo)
+#
+# Binaries (kotlin-lsp-proxy + intellij-dap-bridge, resolution in
+# src/language_servers/util.rs) resolve as: bin/<exec> dev override, then
+# bin/<version>/<exec>. When missing, the extension downloads
+# zed-intellij-v<version>-<target-triple>.tar.gz — a flat archive with both
+# binaries, attached to the GitHub release tagged v<version> by
+# .github/workflows/release.yml — and extracts it into bin/<version>/.
+# Dev reinstalls that wipe bin/ therefore self-heal; local overrides in
+# bin/ still win over downloaded copies.
 [debug_adapters.intellij_jvm]
 languages = ["Kotlin", "Java"]

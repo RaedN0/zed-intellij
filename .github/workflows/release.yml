@@ -1,0 +1,71 @@
+# Builds the native binaries (kotlin-lsp-proxy from proxy/ and
+# intellij-dap-bridge from bridge/) for every supported target and attaches one
+# flat tar.gz per platform to the GitHub release matching the pushed tag.
+#
+# The extension pins exactly this tag — `v<CARGO_PKG_VERSION>` from Cargo.toml
+# (src/language_servers/util.rs) — so bump the version and push a matching tag
+# whenever the binaries change. Asset naming contract:
+#   zed-intellij-v<version>-<target-triple>.tar.gz
+# containing kotlin-lsp-proxy and intellij-dap-bridge at the archive root.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    env:
+      # Pure-Rust crates — cross-compiling aarch64 Linux only needs a linker.
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install aarch64 Linux cross linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build proxy
+        working-directory: proxy
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build bridge
+        working-directory: bridge
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          target="${{ matrix.target }}"
+          staging="$(mktemp -d)"
+          cp "proxy/target/${target}/release/kotlin-lsp-proxy" "$staging/"
+          cp "bridge/target/${target}/release/intellij-dap-bridge" "$staging/"
+          chmod +x "$staging"/*
+          # Flat archive: the extension extracts it directly into bin/<version>/
+          tar -czf "zed-intellij-${GITHUB_REF_NAME}-${target}.tar.gz" \
+            -C "$staging" kotlin-lsp-proxy intellij-dap-bridge
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: zed-intellij-*.tar.gz

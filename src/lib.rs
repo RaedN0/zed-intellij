@@ -4,7 +4,7 @@ use zed_extension_api::{self as zed, settings::LspSettings, Result};
 
 mod language_servers;
 
-use language_servers::{IntelliJServer, Proxy};
+use language_servers::{IntelliJServer, Proxy, util};
 
 // NOTE (personal machine): baked so that intellij-server works with zero
 // per-project configuration — GUI-launched Zed has no JAVA_HOME, and without
@@ -200,22 +200,23 @@ impl zed::Extension for IntelliJServerExtension {
             zed::StartDebuggingRequestArgumentsRequest::Launch
         };
 
-        // The bridge binary is seeded next to the proxy in this extension's work
-        // dir (dev reinstalls wipe it — reseed after reinstalling the dev ext!)
-        let (bridge, bridge_source) = match user_installed_path {
-            Some(path) => (std::path::PathBuf::from(path), "settings override"),
-            None => (
-                std::env::current_dir()
-                    .map_err(|e| format!("no extension work dir: {e}"))?
-                    .join("bin")
-                    .join("intellij-dap-bridge"),
-                "work dir bin/",
-            ),
+        // The bridge ships in the same release archive as the proxy (see
+        // `util::ensure_native_binary`): bin/ holds a local dev override or the
+        // extracted release download. A dev reinstall wipes bin/, but the
+        // extension re-downloads from the pinned GitHub release on demand — no
+        // manual reseeding.
+        let bridge = match user_installed_path {
+            Some(path) => std::path::PathBuf::from(path),
+            None => util::ensure_native_binary("intellij-dap-bridge")?.ok_or_else(|| {
+                "intellij-dap-bridge missing after release download; rebuild bridge/ in the \
+                 zed-intellij repo and attach a fixed archive to the release, then retry"
+                    .to_string()
+            })?,
         };
+        // `user_installed_path` is not validated by Zed — make sure it exists.
         if !bridge.is_file() {
             return Err(format!(
-                "intellij-dap-bridge not found at {} ({bridge_source}); rebuild bridge/ in the \
-                 zed-intellij repo and reseed bin/, then retry",
+                "intellij-dap-bridge not found at {} (settings override); fix the path and retry",
                 bridge.display()
             ));
         }

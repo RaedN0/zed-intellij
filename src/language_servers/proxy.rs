@@ -5,9 +5,6 @@ use zed_extension_api::{self as zed, serde_json::Value, Worktree};
 use crate::language_servers::util;
 
 const PROXY_BINARY: &str = "kotlin-lsp-proxy";
-/// Local override location: `bin/kotlin-lsp-proxy` inside this extension's
-/// work directory.
-const INSTALL_DIR: &str = util::NATIVE_BIN_DIR;
 
 /// Resolves the `kotlin-lsp-proxy` binary that rewrites archive-internal
 /// (`jar!/`, `zip!/`) source URIs returned intellij-server into real files so
@@ -16,13 +13,13 @@ const INSTALL_DIR: &str = util::NATIVE_BIN_DIR;
 ///
 /// Resolution order:
 /// 1. `lsp.intellij-server.settings.proxy_path` in settings.json (escape hatch),
-/// 2. `bin/kotlin-lsp-proxy` in the extension work dir (local copy — on this
-///    machine kept in sync with the one used by the kotlin extension),
-/// 3. nothing -> callers fall back to launching the server directly (only
+/// 2. `bin/kotlin-lsp-proxy` in the extension work dir (local dev override),
+/// 3. `bin/<version>/kotlin-lsp-proxy` — extracted from the release archive
+///    downloaded on demand from the GitHub release pinned to this extension's
+///    version (see `util::ensure_native_binary`; the download also self-heals
+///    the work dir after a dev reinstall),
+/// 4. nothing -> callers fall back to launching the server directly (only
 ///    library source navigation is affected).
-///
-/// Unlike the kotlin extension there is no release download: this extension is
-/// machine-local, the proxy binary ships alongside it in the work dir.
 pub struct Proxy {
     cached_binary_path: Option<PathBuf>,
 }
@@ -46,7 +43,15 @@ impl Proxy {
         let path = if let Some(path) = user_configured_proxy_path(configuration, worktree) {
             Some(PathBuf::from(path))
         } else {
-            util::find_native_binary(&proxy_exec())?
+            // A failed release download must not break the language server —
+            // degrade to None and let the caller launch the server directly.
+            match util::ensure_native_binary(&proxy_exec()) {
+                Ok(path) => path,
+                Err(err) => {
+                    eprintln!("kotlin-lsp-proxy unavailable: {err}");
+                    None
+                }
+            }
         };
 
         match path {
