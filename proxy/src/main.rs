@@ -14,11 +14,16 @@
 #[macro_use]
 mod log;
 mod control;
+mod diagnostics;
 mod lsp;
 mod platform;
 mod resolve;
 
-use lsp::{parse_lsp_content, parse_lsp_id, raw_has_id, write_raw, write_to_stdout, LspReader};
+use diagnostics::DiagnosticCache;
+use lsp::{
+    parse_lsp_content, parse_lsp_id, raw_body_contains, raw_has_id, write_raw, write_to_stdout,
+    LspReader,
+};
 use platform::spawn_parent_monitor;
 use resolve::rewrite_archive_locations;
 use serde_json::Value;
@@ -70,23 +75,58 @@ fn main() {
     // Control channel for the DAP bridge; created once `initialize` reveals the root.
     let hub_slot: Arc<Mutex<Option<Arc<control::ControlHub>>>> = Arc::new(Mutex::new(None));
 
+    // Diagnostics the server published, replayed onto outgoing code-action
+    // requests so the server can offer its quickfixes (see `diagnostics`); also
+    // remembers in-flight `textDocument/diagnostic` pulls.
+    let cache = Arc::new(Mutex::new(DiagnosticCache::default()));
+
     // --- Thread 1: Zed stdin -> kotlin-lsp stdin (record definition-family ids) ---
     let stdin_writer = Arc::clone(&child_stdin);
     let alive_in = Arc::clone(&alive);
     let tracked_in = Arc::clone(&tracked);
     let hub_slot_in = Arc::clone(&hub_slot);
+    let cache_in = Arc::clone(&cache);
     thread::spawn(move || {
         let stdin = io::stdin().lock();
         let mut reader = LspReader::new(BufReader::new(stdin));
         while alive_in.load(Ordering::Relaxed) {
             match reader.read_message() {
-                Ok(Some(raw)) => {
+                Ok(Some(mut raw)) => {
                     // Only requests carry an `id`; skip parsing high-volume notifications.
                     if raw_has_id(&raw) {
-                        if let Some(msg) = parse_lsp_content(&raw) {
+                        if let Some(mut msg) = parse_lsp_content(&raw) {
                             if is_location_request(&msg) {
                                 if let Some(id) = msg.get("id").cloned() {
                                     tracked_in.lock().unwrap().insert(id);
+                                }
+                            }
+                            // Repair the diagnostics a `textDocument/codeAction`
+                            // request carries: add back any the client left out
+                            // (Zed drops those its strict range test excludes), then
+                            // fill in a missing `data` on what is now present. Both
+                            // steps are additive and no-ops when nothing is missing,
+                            // so a correct request is forwarded untouched.
+                            if msg.get("method").and_then(Value::as_str)
+                                == Some("textDocument/codeAction")
+                            {
+                                let cache = cache_in.lock().unwrap();
+                                let supplemented = cache.supplement(&mut msg);
+                                let reinjected = cache.reinject(&mut msg);
+                                drop(cache);
+                                if supplemented || reinjected {
+                                    raw = lsp::encode_lsp(&msg).into_bytes();
+                                }
+                            }
+                            // Correlate pull-diagnostic requests with their responses,
+                            // so the diagnostics can be cached the same way push ones are.
+                            if msg.get("method").and_then(|m| m.as_str())
+                                == Some("textDocument/diagnostic")
+                            {
+                                if let (Some(id), Some(uri)) = (
+                                    msg.get("id").and_then(Value::as_i64),
+                                    msg.pointer("/params/textDocument/uri").and_then(Value::as_str),
+                                ) {
+                                    cache_in.lock().unwrap().track_pull(id, uri.to_owned());
                                 }
                             }
                             if msg.get("method").and_then(|m| m.as_str()) == Some("initialize")
@@ -138,13 +178,25 @@ fn main() {
     let alive_out = Arc::clone(&alive);
     let tracked_out = Arc::clone(&tracked);
     let hub_slot_out = Arc::clone(&hub_slot);
+    let cache_out = Arc::clone(&cache);
     thread::spawn(move || {
         let mut reader = LspReader::new(BufReader::new(child_stdout));
         while alive_out.load(Ordering::Relaxed) {
             match reader.read_message() {
                 Ok(Some(raw)) => {
-                    // Notifications can't be responses we track: forward untouched.
+                    // A notification has no response id, but publishDiagnostics
+                    // carries the diagnostics (and their `data`) that code actions
+                    // need later; a cheap body scan avoids parsing the high-volume
+                    // ones (telemetry, import logs, logMessage).
                     if !raw_has_id(&raw) {
+                        if raw_body_contains(&raw, b"Diagnostics") {
+                            if let Some(mut msg) = parse_lsp_content(&raw).filter(|msg| {
+                                msg.get("method").and_then(Value::as_str)
+                                    == Some("textDocument/publishDiagnostics")
+                            }) {
+                                cache_out.lock().unwrap().record_published(&mut msg);
+                            }
+                        }
                         write_raw(&mut io::stdout().lock(), &raw);
                         continue;
                     }
@@ -157,6 +209,22 @@ fn main() {
                         write_raw(&mut io::stdout().lock(), &raw);
                         continue;
                     };
+
+                    // Responses to client pull-diagnostic requests carry the same
+                    // diagnostics as push notifications; remember them too. The id
+                    // is checked first so completion payloads are never parsed.
+                    if let Some(request_id) = id.as_i64() {
+                        if cache_out.lock().unwrap().is_tracked_pull(request_id) {
+                            if let Some(mut msg) = parse_lsp_content(&raw) {
+                                cache_out
+                                    .lock()
+                                    .unwrap()
+                                    .record_pull_response(request_id, &mut msg);
+                            }
+                            write_raw(&mut io::stdout().lock(), &raw);
+                            continue;
+                        }
+                    }
 
                     // Responses to control-channel requests never reach Zed.
                     if id

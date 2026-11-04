@@ -90,6 +90,20 @@ pub fn raw_has_id(raw: &[u8]) -> bool {
     body.windows(5).any(|w| w == b"\"id\":")
 }
 
+/// Cheap byte-level check that a raw LSP message's body contains `needle`.
+///
+/// Used to decide whether an incoming notification is worth a full JSON parse;
+/// a false positive only costs one parse (the caller re-checks the method), so
+/// the scan deliberately looks at the whole body rather than trying to parse.
+pub fn raw_body_contains(raw: &[u8], needle: &[u8]) -> bool {
+    let Some(sep_pos) = raw.windows(4).position(|w| w == HEADER_SEP) else {
+        return false;
+    };
+    raw[sep_pos + 4..]
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
 pub fn encode_lsp(value: &impl Serialize) -> String {
     let json = serde_json::to_string(value).unwrap();
     format!("{CONTENT_LENGTH}: {}\r\n\r\n{json}", json.len())
