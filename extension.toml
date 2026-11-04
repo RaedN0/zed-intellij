@@ -1,7 +1,7 @@
 id = "intellij-server"
 name = "IntelliJ Server (Java and Kotlin)"
 description = "JetBrains' standalone IntelliJ language server for Java and Kotlin ('Java and Kotlin by IntelliJ IDEA')."
-version = "0.1.0"
+version = "0.2.0"
 schema_version = 1
 authors = ["mschoerghuber"]
 
@@ -9,10 +9,12 @@ authors = ["mschoerghuber"]
 # Grammars themselves come from the official `kotlin`/`java` extensions; only
 # install this alongside them.
 #
-# NOTE (1.0, 2026-10): the upstream server is stable now — "Java and Kotlin by
-# IntelliJ IDEA" 1.0 (build 263.7084.0, product version 2026.3). EAP builds no
-# longer expire; instead the server requires an IDEA Ultimate license after a
-# 30-day trial (enforced by the launcher like the EULA).
+# NOTE (0.2.0): tracks "Java and Kotlin by IntelliJ IDEA" build 271.2085.0
+# (wrapper 1.0.86, 2026-11-03; product version 2027.1). EAP builds no longer
+# expire; instead the server requires an IDEA Ultimate license after a 30-day
+# trial (enforced by the launcher like the EULA). 271 onboards Java/Kotlin
+# source roots itself (the 263-era local importer patch is obsolete) and ships
+# a bundled jbr, used when neither a per-project java_home nor $JAVA_HOME is set.
 [language_servers.intellij-server]
 name = "IntelliJ Server"
 languages = ["Kotlin", "Java"]

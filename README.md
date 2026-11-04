@@ -79,35 +79,37 @@ outgoing code-action requests in two additive steps:
 Neither step removes or overwrites what the client sent, and both are no-ops when
 the request is already correct — such requests are forwarded byte-for-byte.
 
-#### One-time local steps
+#### Shipping proxy/bridge changes
 
-The packed distro download is skipped when
-`bin/<version>/` already exists, and the packed release
-binary stays as it was until a new archive is tagged. On this machine the fix is
-already live: the rebuild lives at `bin/kotlin-lsp-proxy` (dev override). After a
-dev-extension reinstall wipes `bin/`, rebuild and reseed:
+Nothing to reseed by hand: a dev-extension reinstall wipes `bin/`, and the
+extension then re-downloads `zed-intellij-v<version>-<target-triple>.tar.gz` from
+the GitHub release tagged `v<version>`. So a change to `proxy/` or `bridge/`
+reaches Zed only once that release exists:
 
 ```sh
-(cd proxy && cargo build --release)          # rebuild the proxy
-~/.local/share/zed-kotlin-patches/reseed-workdir.sh
+# bump Cargo.toml + extension.toml to the same version, then
+commit … && git push origin main
+git tag v0.2.0 && git push origin v0.2.0   # CI attaches the archives
 ```
 
-To publish new binaries: bump `Cargo.toml`'s version, commit, push a matching
-`v<version>` tag — CI attaches the platform archives to the release, and dev
-reinstalls (which wipe `bin/`) self-heal by re-downloading.
+A local `bin/<exec>` still wins over the downloaded copy (dev override), so a
+local `cargo build --release` in `proxy/` can be tried before tagging. The
+caveat: the pinned tag is `v<CARGO_PKG_VERSION>`, so until a release is tagged
+for the current version, a reinstall silently falls back to the *previous*
+release's binaries.
 
 ### Requirements
 
-- The server distribution is downloaded at runtime from JetBrains. Since 1.0
-  (2026-10) it is stable but **requires an IntelliJ IDEA Ultimate license**
-  after a 30-day trial (enforced by the launcher, like the EULA).
+- The server distribution is downloaded at runtime from JetBrains: build
+  `271.2085.0` (product version 2027.1). It is stable but **requires an
+  IntelliJ IDEA Ultimate license** after a 30-day trial (enforced by the
+  launcher, like the EULA).
 - `JAVA_HOME` / JDK resolution (used for the server's `JAVA_HOME`, its Maven
   import forks via `JB_MAVEN_JAVA_HOME`, and `defaultSdk`):
   1. `lsp.intellij-server.settings.java_home` per project,
-  2. `$JAVA_HOME` from your shell environment.
-
-  When neither is configured the server falls back to its own JVM discovery
-  (`/usr/bin/java`).
+  2. `$JAVA_HOME` from your shell environment,
+  3. the JDK bundled with the server distribution (`jbr/`), for machines with
+     neither of the above.
 - `lsp.intellij-server.settings.vm_options` tunes server JVM flags;
   `lsp.intellij-server.settings.proxy_path` overrides the proxy binary.
 

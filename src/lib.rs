@@ -10,17 +10,21 @@ use language_servers::{IntelliJServer, Proxy, util};
 ///
 /// 1. `lsp.intellij-server.settings.java_home` — per-project override,
 /// 2. `$JAVA_HOME` from the worktree's shell environment (set by login shells,
-///    sdkman, IDE wrappers, …).
+///    sdkman, IDE wrappers, …),
+/// 3. the JDK the server distribution ships (`jbr/`, present since
+///    271.2085.0), so a machine without `JAVA_HOME` still starts.
 ///
-/// The extension sandbox can't stat absolute paths (WASI preopens only the
-/// work dir), so existence is not verified here — the launcher resolves the
-/// path in the real filesystem and reports errors itself.
+/// For sources 1 and 2 the extension sandbox can't stat absolute paths (WASI
+/// preopens only the work dir), so existence is not verified here — the
+/// launcher resolves the path in the real filesystem and reports errors itself.
+/// Source 3 is inside the work dir and therefore checked.
 ///
-/// Errors when neither source is configured, rather than silently letting the
-/// server's Maven import forks fall back to `/usr/bin/java`.
+/// Errors when nothing is configured, rather than silently letting the server's
+/// Maven import forks fall back to `/usr/bin/java`.
 fn resolve_java_home(
     configuration: &Option<serde_json::Value>,
     worktree: &zed::Worktree,
+    bundled: Option<String>,
 ) -> Result<String> {
     if let Some(home) = configuration
         .as_ref()
@@ -38,9 +42,12 @@ fn resolve_java_home(
     {
         return Ok(home);
     }
+    if let Some(home) = bundled {
+        return Ok(home);
+    }
     Err(
-        "JAVA_HOME must be configured via lsp.intellij-server.settings.java_home or the \
-         environment"
+        "JAVA_HOME must be configured via lsp.intellij-server.settings.java_home, the \
+         environment, or the server distribution's bundled jbr"
             .to_string(),
     )
 }
@@ -88,7 +95,8 @@ impl zed::Extension for IntelliJServerExtension {
                 // model. The launcher enforces the bundled EULA before the LSP
                 // handshake; `--eula=<sha256(EULA.txt)[:16]>` records acceptance
                 // for this user+machine. Telemetry stays off.
-                let java_home = resolve_java_home(&configuration, worktree)?;
+                let java_home =
+                    resolve_java_home(&configuration, worktree, intellij_server.bundled_java_home())?;
                 let env = vec![
                     ("JAVA_HOME".to_string(), java_home.clone()),
                     ("INTELLIJ_DATA_SHARING".to_string(), "none".to_string()),
@@ -169,8 +177,12 @@ impl zed::Extension for IntelliJServerExtension {
                 let configuration = LspSettings::for_worktree(language_server_id.as_ref(), worktree)
                     .ok()
                     .and_then(|lsp_settings| lsp_settings.settings);
+                let bundled = self
+                    .intellij_server
+                    .get_or_insert_with(IntelliJServer::new)
+                    .bundled_java_home();
                 Ok(Some(serde_json::json!({
-                    "defaultSdk": resolve_java_home(&configuration, worktree)?,
+                    "defaultSdk": resolve_java_home(&configuration, worktree, bundled)?,
                 })))
             }
             _ => Ok(None),
