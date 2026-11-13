@@ -122,16 +122,12 @@ fn main() {
     dap.write_all(&rewritten)
         .unwrap_or_else(|e| die(&format!("DAP endpoint died on initialize: {e}")));
 
-    // 4. pumps. Zed -> server is frame-aware: DAP `launch` requests that lack
-    //    `javaExec` (Zed/the server never resolve those themselves) get resolved
-    //    via the proxy control socket first — replicating what JetBrains' own
-    //    VS Code client does (`intellij.java.resolveClassDocument` +
-    //    `.resolveLaunch`) before sending the launch. Everything else forwards
-    //    verbatim; server -> Zed is a raw byte pump.
+    // 4. pumps. Zed -> server is frame-aware only to fill in a missing entry
+    //    point (see `intercept_launch`); everything else forwards verbatim.
+    //    Server -> Zed is a raw byte pump.
     let mut tcp_in = dap
         .try_clone()
         .unwrap_or_else(|e| die(&format!("tcp clone failed: {e}")));
-    let pump_sock = sock_path.clone();
     thread::spawn(move || {
         let mut stdin = std::io::stdin();
         loop {
@@ -142,7 +138,7 @@ fn main() {
                     return;
                 }
             };
-            let out = match intercept_launch(&frame, &pump_sock) {
+            let out = match intercept_launch(&frame) {
                 Some(resolved) => resolved,
                 None => frame,
             };
@@ -185,21 +181,16 @@ fn connect_with_retry(sock_path: &Path) -> UnixStream {
     }
 }
 
-/// Upgrades a `launch` request in place, in two independent steps:
+/// Upgrades a `launch` request in place: **entry point from the open file**.
 ///
-///   1. **Entry point from the open file.** A configuration of
-///      `{"request":"launch","file":"$ZED_FILE"}` names no class, so the
-///      fully-qualified name of the `main` declaration is derived from that
-///      file here. That is what makes a single entry in the *global*
-///      debug.json debug whatever file is open, in any project — intellij-server
-///      resolves the classpath, module and JDK from its project model, but not
-///      the entry point itself.
-///   2. **Classpath resolution via the proxy**, when a main class is known and
-///      `javaExec` is not — the proxy owns the live LSP session, so the server
-///      can resolve against the project it actually imported.
+/// A configuration of `{"request":"launch","file":"$ZED_FILE"}` names no class,
+/// so the fully-qualified name of the `main` declaration is derived from that
+/// file here. That is what makes a single entry in the *global* debug.json debug
+/// whatever file is open, in any project — intellij-server resolves the classpath,
+/// module and JDK from its project model, but not the entry point itself.
 ///
 /// `None` means "nothing to rewrite", so the caller forwards the frame verbatim.
-fn intercept_launch(frame: &[u8], sock_path: &Path) -> Option<Vec<u8>> {
+fn intercept_launch(frame: &[u8]) -> Option<Vec<u8>> {
     let header_end = frame
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -215,7 +206,7 @@ fn intercept_launch(frame: &[u8], sock_path: &Path) -> Option<Vec<u8>> {
     let mut args = value.get("arguments").cloned().unwrap_or(Value::Null);
     let mut rewritten = false;
 
-    // 1. Derive the entry point when the configuration only names a file.
+    // Derive the entry point when the configuration only names a file.
     let main_class = args
         .get("mainClass")
         .and_then(|v| v.as_str())
@@ -233,26 +224,8 @@ fn intercept_launch(frame: &[u8], sock_path: &Path) -> Option<Vec<u8>> {
         }
     }
 
-    let has_main = args
-        .get("mainClass")
-        .and_then(|v| v.as_str())
-        .is_some_and(|class| !class.is_empty());
-    let has_exec = args
-        .get("javaExec")
-        .and_then(|v| v.as_str())
-        .is_some_and(|exec| !exec.is_empty());
-
-    // 2. Resolve classpath/module/JDK against the live project model.
-    if has_main && !has_exec {
-        if let Some(merged) = resolve_via_proxy(&args, sock_path) {
-            trace("launch resolved, forwarding");
-            args = merged;
-            rewritten = true;
-        }
-    }
-
     if !rewritten {
-        return None; // attach, already resolved, or nothing we can improve
+        return None; // attach, no main in that file, or an explicit mainClass
     }
     value["arguments"] = args;
     let body = serde_json::to_vec(&value).ok()?;
@@ -264,35 +237,6 @@ fn reframe(body: &[u8]) -> Vec<u8> {
     let mut out = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
     out.extend_from_slice(body);
     out
-}
-
-/// Asks the proxy (which owns the live LSP session) to resolve a launch against
-/// intellij-server's project model.
-///
-/// `None` for every failure mode — no socket, `ERR` reply, unparseable answer —
-/// because an unresolved launch is still worth forwarding: the server does what
-/// it can, and a debug session is better than a dropped request.
-fn resolve_via_proxy(args: &Value, sock_path: &Path) -> Option<Value> {
-    trace("launch: resolving via project model");
-    let mut control = UnixStream::connect(sock_path).ok()?;
-    let body = serde_json::to_vec(args).ok()?;
-    control
-        .write_all(b"RESOLVE ")
-        .and_then(|_| control.write_all(&body))
-        .and_then(|_| control.write_all(b"\n"))
-        .and_then(|_| control.flush())
-        .ok()?;
-    let mut reply = String::new();
-    use std::io::BufRead;
-    std::io::BufReader::new(control)
-        .read_line(&mut reply)
-        .ok()?;
-    let reply = reply.trim();
-    if let Some(err) = reply.strip_prefix("ERR ") {
-        trace(&format!("resolve FAILED: {err} (forwarding unresolved)"));
-        return None;
-    }
-    serde_json::from_str::<Value>(reply.strip_prefix("OK ")?).ok()
 }
 
 /// Fully-qualified name of the `main` entry point declared in `path`.
@@ -433,6 +377,14 @@ mod tests {
     }
 
     /// Body of a framed message, asserting the framing is self-consistent.
+    fn content_length(msg: &[u8]) -> String {
+        String::from_utf8_lossy(msg)
+            .split("\r\n")
+            .find_map(|line| line.strip_prefix("Content-Length:"))
+            .map(|n| n.trim().to_string())
+            .expect("frame declares a Content-Length")
+    }
+
     fn body_of(msg: &[u8]) -> &[u8] {
         let start = msg
             .windows(4)
@@ -621,30 +573,24 @@ mod tests {
         assert_eq!(rewrite_initialize(&raw), raw);
     }
 
-    // --- launch resolution ---
+    // --- launch rewriting ---
 
     #[test]
-    fn passes_through_launches_that_need_no_resolution() {
-        let nowhere = Path::new("/nonexistent/intellij-dap.sock");
-        // Attach: no mainClass to resolve.
-        assert!(intercept_launch(
-            &frame(r#"{"seq":2,"command":"launch","arguments":{"request":"attach"}}"#),
-            nowhere
-        )
+    fn passes_through_launches_that_need_no_rewrite() {
+        // Attach: not a launch of an entry point.
+        assert!(intercept_launch(&frame(
+            r#"{"seq":2,"command":"launch","arguments":{"request":"attach"}}"#
+        ))
         .is_none());
-        // Already resolved by the caller.
-        assert!(intercept_launch(
-            &frame(
-                r#"{"seq":3,"command":"launch","arguments":{"mainClass":"a.B","javaExec":"/jbr/bin/java"}}"
-            ),
-            nowhere
-        )
+        // A resolved launch: the caller already named the entry point.
+        assert!(intercept_launch(&frame(
+            r#"{"seq":3,"command":"launch","arguments":{"mainClass":"a.B","javaExec":"/jbr/bin/java"}}"#
+        ))
         .is_none());
         // Not a launch at all.
-        assert!(intercept_launch(
-            &frame(r#"{"seq":4,"command":"setBreakpoints","arguments":{"mainClass":"a.B"}}"#),
-            nowhere
-        )
+        assert!(intercept_launch(&frame(
+            r#"{"seq":4,"command":"setBreakpoints","arguments":{"mainClass":"a.B"}}"#
+        ))
         .is_none());
     }
 
@@ -652,10 +598,9 @@ mod tests {
     fn forwards_unresolved_when_the_control_socket_is_missing() {
         // A missing proxy must not swallow the launch: the server falls back to
         // its own resolution, which is strictly better than no debug session.
-        assert!(intercept_launch(
-            &frame(r#"{"seq":5,"command":"launch","arguments":{"mainClass":"a.B"}}"#),
-            Path::new("/nonexistent/intellij-dap.sock")
-        )
+        assert!(intercept_launch(&frame(
+            r#"{"seq":5,"command":"launch","arguments":{"mainClass":"a.B"}}"#
+        ))
         .is_none());
     }
 
@@ -716,10 +661,10 @@ mod tests {
             r#"{{"seq":9,"command":"launch","arguments":{{"request":"launch","file":"{}"}}}}"#,
             file.display()
         ));
-        // No proxy socket: classpath resolution fails, but the inferred entry
-        // point must still be forwarded rather than dropped.
-        let out = intercept_launch(&launch, Path::new("/nonexistent/x.sock"))
-            .expect("frame is rewritten with the inferred entry point");
+        let out =
+            intercept_launch(&launch).expect("frame is rewritten with the inferred entry point");
+        // Content-Length must be recomputed: the body grew by `mainClass`.
+        assert_eq!(body_of(&out).len().to_string(), content_length(&out));
         let value: Value = serde_json::from_slice(body_of(&out)).unwrap();
         assert_eq!(value["arguments"]["mainClass"], json!("com.example.App"));
         assert_eq!(value["arguments"]["request"], json!("launch"));
@@ -732,77 +677,8 @@ mod tests {
         let launch = frame(
             r#"{"seq":10,"command":"launch","arguments":{"mainClass":"a.B","file":"/does/not/exist.java"}}"#,
         );
-        // Class name present and javaExec absent: only the proxy step would
-        // apply, and it is unreachable, so the frame stays untouched.
-        assert!(intercept_launch(&launch, Path::new("/nonexistent/x.sock")).is_none());
-    }
-
-    #[test]
-    fn forwards_unresolved_when_the_proxy_reports_an_error() {
-        let (path, proxy) = fake_proxy("ERR no project model\n");
-        let out = intercept_launch(
-            &frame(r#"{"seq":6,"command":"launch","arguments":{"mainClass":"a.B"}}"#),
-            &path,
-        );
-        proxy.join().unwrap();
-        let _ = std::fs::remove_file(&path);
-        assert!(out.is_none());
-    }
-
-    #[test]
-    fn merges_the_resolved_arguments_and_reframes() {
-        let (path, proxy) = fake_proxy(
-            "OK {\"mainClass\":\"a.B\",\"javaExec\":\"/jbr/bin/java\",\"classPaths\":[\"/out\"]}\n",
-        );
-        let out = intercept_launch(
-            &frame(r#"{"seq":7,"command":"launch","arguments":{"mainClass":"a.B"}}"#),
-            &path,
-        )
-        .expect("a resolved launch is forwarded");
-        proxy.join().unwrap();
-        let _ = std::fs::remove_file(&path);
-
-        let value: Value = serde_json::from_slice(body_of(&out)).unwrap();
-        // Content-Length was recomputed for the longer merged body.
-        assert_eq!(value["command"], json!("launch"));
-        assert_eq!(value["seq"], json!(7), "the original envelope is preserved");
-        assert_eq!(value["arguments"]["javaExec"], json!("/jbr/bin/java"));
-        assert_eq!(value["arguments"]["classPaths"], json!(["/out"]));
-    }
-
-    /// Stand-in for kotlin-lsp-proxy: binds a control socket, reads the RESOLVE
-    /// line and answers with `reply`. Returns the socket path and the thread.
-    fn fake_proxy(reply: &str) -> (PathBuf, thread::JoinHandle<()>) {
-        use std::os::unix::net::UnixListener;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-
-        let path = env::temp_dir().join(format!(
-            "zidt-{}-{}.sock",
-            process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path).expect("bind test control socket");
-        let reply = reply.to_string();
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("bridge connects");
-            // Read the whole `RESOLVE <json>\n` request before answering.
-            let mut request = Vec::new();
-            let mut byte = [0u8; 1];
-            while stream.read_exact(&mut byte).is_ok() {
-                request.push(byte[0]);
-                if request.ends_with(b"\n") {
-                    break;
-                }
-            }
-            assert!(
-                String::from_utf8_lossy(&request).starts_with("RESOLVE "),
-                "unexpected control request: {}",
-                String::from_utf8_lossy(&request)
-            );
-            stream.write_all(reply.as_bytes()).unwrap();
-        });
-        (path, handle)
+        // A class is already named and the file does not exist, so there is
+        // nothing to infer and the frame must stay byte-identical.
+        assert!(intercept_launch(&launch).is_none());
     }
 }

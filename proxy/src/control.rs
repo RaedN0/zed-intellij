@@ -13,16 +13,22 @@
 //!   bridge -> `START\n`
 //!   proxy  -> `PORT <n>\n` | `ERR <message>\n`
 //!
+//! Launch configs are not resolved here. An earlier version forwarded them to
+//! `intellij.java.resolveLaunch` first, mirroring the JetBrains VS Code client;
+//! that command does not exist in 271.2085.0 (the only java command ids there are
+//! buildTool, codeserver, compiler, debugger, execution, frontback, psi and
+//! resolveClassDocument) and the server resolves run steps itself inside the DAP
+//! launch handler (`JvmDebuggerLaunchSupport.resolveRunSteps`). The bridge simply
+//! forwards `launch` arguments.
+//!
 //! Injected `executeCommand` requests use ids in a range Zed never produces
 //! (>= 1<<40); their responses are consumed here and never forwarded to Zed.
 
 use serde_json::{json, Value};
 
-/// Answer for the bridge. START replies `PORT <n>` (the bridge's original
-/// protocol); RESOLVE replies `OK <json>`; failures reply `ERR <message>`.
+/// Answer for the bridge. START replies `PORT <n>`; failures reply `ERR <message>`.
 enum BridgeReply {
     Port(Value),
-    Ok(Value),
     Err(String),
 }
 use std::{
@@ -116,145 +122,17 @@ impl ControlHub {
         let line = line.trim();
         let reply = if line.eq_ignore_ascii_case("START") {
             self.start_debug_server()
-        } else if let Some(config) = line.strip_prefix("RESOLVE ") {
-            self.resolve_launch(config)
         } else {
-            BridgeReply::Err("expected START or RESOLVE <json>".into())
+            BridgeReply::Err("expected START".into())
         };
         match reply {
             BridgeReply::Err(msg) => {
                 let _ = writeln!(stream, "ERR {msg}");
             }
-            BridgeReply::Ok(value) => {
-                let _ = writeln!(stream, "OK {value}");
-            }
             BridgeReply::Port(number) => {
                 let _ = writeln!(stream, "PORT {number}");
             }
         };
-    }
-
-    /// The JetBrains client (dap.ts) always resolves a JVM launch before the DAP
-    /// request: mainClass -> source uri (`intellij.java.resolveClassDocument`),
-    /// then uri -> runtime paths (`intellij.java.resolveLaunch`) against the
-    /// imported project model, merging javaExec/classpath/modulePath/vmArgs/
-    /// workingDirectory into the launch config. The server's DAP `launch`
-    /// handler requires that pre-work — replying exactly what its VS Code
-    /// client would have done.
-    fn resolve_launch(&self, config_json: &str) -> BridgeReply {
-        let Ok(cfg) = serde_json::from_str::<Value>(config_json) else {
-            return BridgeReply::Err("RESOLVE payload is not JSON".into());
-        };
-        if cfg.get("mainClass").and_then(|v| v.as_str()).is_none() {
-            return BridgeReply::Err("launch config has no mainClass to resolve".into());
-        }
-        log_info("control: resolving JVM launch via project model");
-
-        // 1. If the config carries no `file`, find the declaration's document.
-        let uri = match cfg.get("file").and_then(|v| v.as_str()) {
-            Some(file) => Value::String(format!("file://{file}")),
-            None => {
-                let resp = match self.request(json!({
-                    "command": "intellij.java.resolveClassDocument",
-                    "arguments": [{"fqn": cfg["mainClass"]}],
-                })) {
-                    Ok(r) => r,
-                    Err(e) => return BridgeReply::Err(e),
-                };
-                // `request` returns the whole response envelope; the payload
-                // (the class document lookup) is under "result".
-                match resp.get("result").and_then(|r| r.get("uri")).cloned() {
-                    Some(uri) => uri,
-                    None => {
-                        return BridgeReply::Err(format!(
-                            "resolveClassDocument returned no uri: {}",
-                            serde_json::to_string(&resp.get("result")).unwrap_or_default()
-                        ))
-                    }
-                }
-            }
-        };
-
-        // 2. Resolve runtime paths. The wire shape mirrors what the VS Code
-        //    client produces: fields are DROPPED when unset, never sent as
-        //    JSON `null` — explicit nulls poison the server's Kotlin
-        //    deserializer, which answers with an EMPTY payload instead of an
-        //    error (verified with harness_resolve_probe.py).
-        let mut launch_arg = json!({ "uri": uri });
-        if let Some(cwd) = cfg.get("cwd").filter(|v| !v.is_null()) {
-            launch_arg["cwd"] = cwd.clone();
-        }
-        let mut overrides = serde_json::Map::new();
-        for key in [
-            "classPaths",
-            "modulePaths",
-            "moduleName",
-            "javaExec",
-            "vmArgs",
-        ] {
-            if let Some(v) = cfg.get(key).filter(|v| !v.is_null()) {
-                overrides.insert(key.to_string(), v.clone());
-            }
-        }
-        if !overrides.is_empty() {
-            launch_arg["overrides"] = Value::Object(overrides);
-        }
-        let resp = match self.request(json!({
-            "command": "intellij.java.resolveLaunch",
-            "arguments": [launch_arg],
-        })) {
-            Ok(r) => r,
-            Err(e) => return BridgeReply::Err(e),
-        };
-
-        // 3. Merge: resolved values fill gaps; config's own win where present.
-        //    The payload again lives under "result".
-        let resolved = resp.get("result").cloned().unwrap_or(Value::Null);
-        let mut merged = cfg;
-        let merge = |cfg: &mut Value, key: &str, resolved: Option<&Value>| {
-            if let Some(v) = resolved {
-                if !v.is_null() && (v.is_string() && v.as_str() != Some("") || !v.is_string()) {
-                    cfg[key] = v.clone();
-                } else if cfg.get(key).is_none() {
-                    cfg[key] = json!([]);
-                }
-            } else if cfg.get(key).is_none() {
-                cfg[key] = json!([]);
-            }
-        };
-        merge(&mut merged, "javaExec", resolved.get("javaExec"));
-        merge(&mut merged, "classPaths", resolved.get("classpath"));
-        merge(&mut merged, "modulePaths", resolved.get("modulePath"));
-        merge(
-            &mut merged,
-            "moduleContentPaths",
-            resolved.get("moduleContentPaths"),
-        );
-        merge(&mut merged, "vmArgs", resolved.get("vmArgs"));
-        if let Some(name) = resolved.get("moduleName") {
-            if name.is_string() {
-                merged["moduleName"] = name.clone();
-            }
-        }
-        if merged
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .is_empty()
-        {
-            if let Some(wd) = resolved.get("workingDirectory") {
-                merged["cwd"] = wd.clone();
-            }
-        }
-        if merged
-            .get("javaExec")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .is_empty()
-        {
-            return BridgeReply::Err("resolveLaunch produced no javaExec".into());
-        }
-        BridgeReply::Ok(merged)
     }
 
     fn start_debug_server(&self) -> BridgeReply {
