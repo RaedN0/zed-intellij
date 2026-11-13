@@ -335,3 +335,32 @@ impl ControlHub {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // intellij-dap-bridge derives the same socket path with its own copy of this
+    // hash (bridge/src/main.rs::socket_path). The two processes only meet if the
+    // two copies agree, and a drift does not fail a build — it makes every debug
+    // session wait out the bridge's connect timeout and then report a missing
+    // socket. Both crates pin the same literals so the drift fails here instead.
+
+    #[test]
+    fn fnv64_matches_the_fnv1a_64_reference_vectors() {
+        assert_eq!(fnv64(""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv64("a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv64("foobar"), 0x8594_4171_f739_67e8);
+    }
+
+    #[test]
+    fn socket_name_for_a_root_uri_is_pinned() {
+        // Literal mirrored in bridge/src/main.rs's tests.
+        let name = socket_path_for("file:///repo");
+        assert_eq!(
+            name.file_name().unwrap().to_str().unwrap(),
+            "intellij-dap-df01bf954840a316.sock"
+        );
+        assert_eq!(name.parent().unwrap(), env::temp_dir());
+    }
+}
