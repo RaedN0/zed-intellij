@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per branch: a new push cancels the previous, unfinished run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The extension crate: compiles to WASI and talks to Zed through
+  # zed_extension_api, whose *host* build stubs the filesystem and platform
+  # calls out with unreachable!(). Tests that need those cannot run here, so
+  # `cargo test` covers the pure logic (settings parsing, EULA hash format and
+  # precedence, diagnostic overlap) and the wasm build proves the rest links.
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Validate extension.toml
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys, tomllib
+
+          manifest = tomllib.load(open("extension.toml", "rb"))
+          problems = []
+          for name, adapter in manifest.get("debug_adapters", {}).items():
+              path = adapter.get("schema_path")
+              if not path:
+                  continue
+              if not pathlib.Path(path).is_file():
+                  problems.append(f"{name}: schema_path does not exist: {path}")
+                  continue
+              try:
+                  json.load(open(path))
+              except Exception as exc:
+                  problems.append(f"{name}: schema_path is not valid JSON: {exc}")
+          if problems:
+              sys.exit("\n".join(problems))
+          print("extension.toml OK")
+          PY
+
+      - name: Format
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --release --target wasm32-wasip1 --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Build
+        run: cargo build --release --target wasm32-wasip1
+
+  # The two native helpers. Neither is a workspace member of the root crate —
+  # each has its own Cargo.lock — so every step runs in its own directory.
+  #
+  # No Windows runner on purpose: the bridge and the proxy's control channel
+  # speak over Unix sockets (std::os::unix::net, see proxy/src/control.rs and
+  # bridge/src/main.rs), so they do not build there yet. Adding Windows would
+  # turn this workflow permanently red until that portability work lands.
+  native:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        crate: [proxy, bridge]
+    defaults:
+      run:
+        working-directory: ${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }} -> target
+
+      - name: Format
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
