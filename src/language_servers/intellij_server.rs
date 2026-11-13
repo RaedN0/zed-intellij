@@ -1,5 +1,7 @@
 use std::fs;
 
+use sha2::{Digest, Sha256};
+use zed::serde_json;
 use zed_extension_api::{self as zed, make_file_executable, Result};
 
 use crate::language_servers::util;
@@ -44,6 +46,10 @@ impl IntelliJServer {
     // enforces the EULA before the LSP handshake; passing the hash via
     // `--eula=<hash>` records acceptance for this user+machine. Unchanged from
     // 263.7084.0 (verified against the extracted 271.2085.0 distro).
+    //
+    // FALLBACK ONLY — [`eula_hash`](Self::eula_hash) prefers the hash computed
+    // from the EULA.txt of whatever distribution is actually installed, so a
+    // version bump cannot leave this value stale.
     pub const EULA_SHA256_16: &'static str = "cd82e6cdaf2790f1";
 
     pub fn new() -> Self {
@@ -77,6 +83,55 @@ impl IntelliJServer {
                 let java = format!("{home}/bin/java{}", exe_suffix());
                 fs::metadata(&java).is_ok_and(|metadata| metadata.is_file())
             })
+    }
+
+    /// The EULA acceptance hash to pass as `--eula=<hash>`.
+    ///
+    /// The launcher compares this against `sha256(EULA.txt)[:16]` of its own
+    /// bundle before it starts, so it has to track the *installed* version
+    /// rather than a value pinned in this source file — see
+    /// [`EULA_SHA256_16`](Self::EULA_SHA256_16), which is only the last resort.
+    ///
+    /// Resolution order:
+    /// 1. `lsp.intellij-server.settings.eula_hash` — explicit override,
+    /// 2. the `EULA.txt` shipped inside the installed distribution
+    ///    (`<server home>/EULA.txt`),
+    /// 3. [`EULA_SHA256_16`](Self::EULA_SHA256_16) — the hash of the pinned
+    ///    build, for the window in which no distribution is extracted yet.
+    pub fn eula_hash(&self, configuration: &Option<serde_json::Value>) -> String {
+        if let Some(hash) = eula_hash_override(configuration) {
+            return hash.to_string();
+        }
+
+        match self.eula_txt_path().and_then(|path| fs::read(path).ok()) {
+            Some(data) => sha256_prefix_16(&data),
+            None => Self::EULA_SHA256_16.to_string(),
+        }
+    }
+
+    /// Locate the `EULA.txt` of the installed distribution — `<server
+    /// home>/EULA.txt`, one level above the `bin/` directory that holds
+    /// `intellij-server`.
+    ///
+    /// Prefers the directory of the already-resolved binary, and falls back to
+    /// scanning the pinned version's extension directory so the hash is still
+    /// available on the very first launch.
+    fn eula_txt_path(&self) -> Option<String> {
+        let from_binary = self
+            .cached_binary_path
+            .as_deref()
+            .map(std::path::Path::new)
+            .and_then(|binary| binary.parent())
+            .and_then(|bin_dir| bin_dir.parent())
+            .map(|home| home.join("EULA.txt"));
+        if let Some(path) = from_binary.filter(|path| path.is_file()) {
+            return Some(path.to_string_lossy().into_owned());
+        }
+
+        let extension_dir = format!("{}-{}", Self::LANGUAGE_SERVER_ID, Self::SERVER_VERSION);
+        let home = locate_server_home(&extension_dir, exe_suffix())?;
+        let path = std::path::Path::new(&home).join("EULA.txt");
+        path.is_file().then(|| path.to_string_lossy().into_owned())
     }
 
     pub fn language_server_binary_path(
@@ -201,5 +256,75 @@ fn exe_suffix() -> &'static str {
     match zed_extension_api::current_platform().0 {
         zed::Os::Windows => ".exe",
         _ => "",
+    }
+}
+
+/// `lsp.intellij-server.settings.eula_hash`, if the user set a non-empty one.
+///
+/// Kept separate from [`IntelliJServer::eula_hash`] so the precedence rule can
+/// be tested without touching the WASI filesystem APIs.
+fn eula_hash_override(configuration: &Option<serde_json::Value>) -> Option<&str> {
+    configuration
+        .as_ref()
+        .and_then(|settings| settings.pointer("/eula_hash"))
+        .and_then(|value| value.as_str())
+        .filter(|hash| !hash.is_empty())
+}
+
+/// First 16 hex chars (64 bits) of the SHA-256 digest of `data` — the form the
+/// launcher expects for `--eula=<hash>`.
+fn sha256_prefix_16(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let digest = hasher.finalize();
+    let mut prefix = [0u8; 8];
+    prefix.copy_from_slice(&digest[..8]);
+    format!("{:016x}", u64::from_be_bytes(prefix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_prefix_matches_known_digest() {
+        // sha256("") = e3b0c44298fc1c149afbf4c8996fb924...
+        assert_eq!(sha256_prefix_16(b""), "e3b0c44298fc1c14");
+    }
+
+    #[test]
+    fn sha256_prefix_is_sixteen_hex_chars() {
+        let prefix = sha256_prefix_16(b"JetBrains User Agreement");
+        assert_eq!(prefix.len(), 16);
+        assert!(prefix.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn eula_hash_prefers_settings_override() {
+        let server = IntelliJServer::new();
+        let settings = Some(serde_json::json!({ "eula_hash": "0123456789abcdef" }));
+        assert_eq!(server.eula_hash(&settings), "0123456789abcdef");
+    }
+
+    #[test]
+    fn eula_hash_override_ignores_empty_and_missing_values() {
+        assert_eq!(eula_hash_override(&None), None);
+        assert_eq!(eula_hash_override(&Some(serde_json::json!({}))), None);
+        assert_eq!(
+            eula_hash_override(&Some(serde_json::json!({ "eula_hash": "" }))),
+            None
+        );
+        let settings = Some(serde_json::json!({ "eula_hash": "0123456789abcdef" }));
+        assert_eq!(eula_hash_override(&settings), Some("0123456789abcdef"));
+    }
+
+    #[test]
+    fn pinned_fallback_is_a_well_formed_eula_hash() {
+        // The launcher compares 16 hex chars, so a truncated/typo'd constant
+        // would fail the handshake instead of falling back gracefully.
+        assert_eq!(IntelliJServer::EULA_SHA256_16.len(), 16);
+        assert!(IntelliJServer::EULA_SHA256_16
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
     }
 }

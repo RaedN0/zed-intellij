@@ -18,6 +18,31 @@ This is a machine-local extension, not (yet) in the Zed registry. In Zed:
 Rust `wasm32-wasip1` target). Grammars come from Zed's official `kotlin`/`java`
 extensions — install this alongside them.
 
+### Accepting the JetBrains license (first run)
+
+Nothing is downloaded until you accept JetBrains' license. On first launch the
+language server reports a failure pointing back here instead of fetching the
+distribution; opt in by adding this to `settings.json` and reloading the window:
+
+```json
+{
+  "lsp": {
+    "intellij-server": {
+      "settings": {
+        "accept_jetbrains_eula": true
+      }
+    }
+  }
+}
+```
+
+The server is proprietary JetBrains software governed by the **JetBrains User
+Agreement v2.0**, which ships as `EULA.txt` inside the downloaded bundle.
+Acceptance is recorded with the launcher by passing
+`--eula=<sha256(EULA.txt)[:16]>`; that hash is derived from the EULA.txt of the
+build you actually have, so it tracks version bumps instead of being pinned.
+Only a literal JSON `true` enables the download — a string `"true"` does not.
+
 ### Native binaries
 
 Two native helpers are needed; the extension resolves them in this order (see
@@ -110,6 +135,13 @@ release's binaries.
   2. `$JAVA_HOME` from your shell environment,
   3. the JDK bundled with the server distribution (`jbr/`), for machines with
      neither of the above.
+- `lsp.intellij-server.settings.accept_jetbrains_eula` must be `true` before
+  the server is downloaded or executed (see *Accepting the JetBrains license*).
+- `lsp.intellij-server.settings.eula_hash` overrides the acceptance hash. By
+  default it is computed from the `EULA.txt` of the installed distribution, so
+  it follows the pinned build; the constant in
+  `src/language_servers/intellij_server.rs` is only a fallback for the window
+  before a distribution has been extracted.
 - `lsp.intellij-server.settings.vm_options` tunes server JVM flags;
   `lsp.intellij-server.settings.proxy_path` overrides the proxy binary.
 

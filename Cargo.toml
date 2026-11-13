@@ -11,3 +11,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 zed_extension_api = "0.6.0"
+# EULA acceptance hash is computed from the installed distribution's EULA.txt
+# (see IntelliJServer::eula_hash) instead of being pinned in a constant.
+sha2 = "0.10"

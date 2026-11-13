@@ -52,6 +52,44 @@ fn resolve_java_home(
     )
 }
 
+/// Shown when the user has not accepted the JetBrains EULA.
+///
+/// The server distribution is proprietary JetBrains software: it must not be
+/// downloaded (it is ~370 MB) or executed before the user has read and accepted
+/// the JetBrains User Agreement. Consent is opt-in, once, in settings.json.
+const EULA_GATE_MESSAGE: &str = concat!(
+    "The intellij-server distribution is proprietary software by JetBrains.\n",
+    "It is downloaded from JetBrains' CDN only after you have read and accepted\n",
+    "their license, the JetBrains User Agreement (v2.0) — the exact text ships\n",
+    "as EULA.txt inside the server bundle, and is published under\n",
+    "https://www.jetbrains.com/legal/.\n",
+    "\n",
+    "To accept, add this to your Zed settings.json and reload the window:\n",
+    "\n",
+    "{\n",
+    "  \"lsp\": {\n",
+    "    \"intellij-server\": {\n",
+    "      \"settings\": {\n",
+    "        \"accept_jetbrains_eula\": true\n",
+    "      }\n",
+    "    }\n",
+    "  }\n",
+    "}",
+);
+
+/// Whether the user has explicitly accepted the JetBrains EULA via
+/// `lsp.intellij-server.settings.accept_jetbrains_eula`.
+///
+/// False unless the setting is a literal JSON `true` — a string `"true"` does
+/// not count, so a typo cannot silently imply consent to a license.
+fn accepts_jetbrains_eula(configuration: &Option<serde_json::Value>) -> bool {
+    configuration
+        .as_ref()
+        .and_then(|settings| settings.pointer("/accept_jetbrains_eula"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
 /// The adapter id intellij-server's debugger lookup expects — also the name
 /// registered under [debug_adapters] in extension.toml and used as the
 /// `adapter` field of debug configurations in .zed/debug.json.
@@ -80,15 +118,32 @@ impl zed::Extension for IntelliJServerExtension {
                 let intellij_server = self
                     .intellij_server
                     .get_or_insert_with(IntelliJServer::new);
-                let binary_path = intellij_server.language_server_binary_path(language_server_id)?;
 
-                // Per-project overrides from `lsp.intellij-server` in settings.json:
-                // `settings.proxy_path` (proxy binary) and `settings.vm_options`
-                // (JVM flags for the server, see `java_options`).
+                // Per-project settings from `lsp.intellij-server` in settings.json:
+                // `accept_jetbrains_eula` (consent gate, evaluated first),
+                // `proxy_path` (proxy binary), `vm_options` (JVM flags for the
+                // server, see `java_options`) and `eula_hash` (acceptance-hash
+                // override, see `IntelliJServer::eula_hash`).
                 let configuration =
                     LspSettings::for_worktree(language_server_id.as_ref(), worktree)
                         .ok()
                         .and_then(|lsp_settings| lsp_settings.settings);
+
+                // EULA gate: nothing is downloaded or executed without explicit
+                // consent. This has to stay *ahead* of
+                // `language_server_binary_path`, because that call is what
+                // triggers the proprietary download.
+                if !accepts_jetbrains_eula(&configuration) {
+                    zed::set_language_server_installation_status(
+                        language_server_id,
+                        &zed::LanguageServerInstallationStatus::Failed(
+                            EULA_GATE_MESSAGE.to_string(),
+                        ),
+                    );
+                    return Err(EULA_GATE_MESSAGE.to_string());
+                }
+
+                let binary_path = intellij_server.language_server_binary_path(language_server_id)?;
 
                 // JetBrains intellij-server ("Java and Kotlin by IntelliJ IDEA"):
                 // serves Java AND Kotlin buffers from the same engine and project
@@ -97,6 +152,12 @@ impl zed::Extension for IntelliJServerExtension {
                 // for this user+machine. Telemetry stays off.
                 let java_home =
                     resolve_java_home(&configuration, worktree, intellij_server.bundled_java_home())?;
+
+                // The accepted hash is derived from the EULA.txt of the
+                // *installed* distribution (see `IntelliJServer::eula_hash`), so
+                // it follows a version bump instead of being pinned here.
+                let eula_arg = format!("--eula={}", intellij_server.eula_hash(&configuration));
+
                 let env = vec![
                     ("JAVA_HOME".to_string(), java_home.clone()),
                     ("INTELLIJ_DATA_SHARING".to_string(), "none".to_string()),
@@ -135,22 +196,18 @@ impl zed::Extension for IntelliJServerExtension {
                             args: vec![
                                 absolute_binary_path,
                                 "--stdio".to_string(),
-                                format!("--eula={}", IntelliJServer::EULA_SHA256_16),
+                                eula_arg.clone(),
                             ],
                             env,
                         })
                     }
                     Ok(None) => {
                         eprintln!(
-                            "kotlin-lsp-proxy not found in {}/; launching intellij-server directly",
-                            "bin"
+                            "kotlin-lsp-proxy not found in bin/; launching intellij-server directly"
                         );
                         Ok(zed::Command {
                             command: binary_path,
-                            args: vec![
-                                "--stdio".to_string(),
-                                format!("--eula={}", IntelliJServer::EULA_SHA256_16),
-                            ],
+                            args: vec!["--stdio".to_string(), eula_arg.clone()],
                             env,
                         })
                     }
@@ -177,6 +234,11 @@ impl zed::Extension for IntelliJServerExtension {
                 let configuration = LspSettings::for_worktree(language_server_id.as_ref(), worktree)
                     .ok()
                     .and_then(|lsp_settings| lsp_settings.settings);
+                // Same gate as `language_server_command`: never hand the server
+                // an SDK until the user has accepted the license.
+                if !accepts_jetbrains_eula(&configuration) {
+                    return Err(EULA_GATE_MESSAGE.to_string());
+                }
                 let bundled = self
                     .intellij_server
                     .get_or_insert_with(IntelliJServer::new)
@@ -320,6 +382,25 @@ fn java_options(configuration: &Option<serde_json::Value>, java_home: &str) -> S
         options.push_str(option);
     }
     options
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eula_gate_requires_a_literal_true() {
+        let accept = serde_json::json!({ "accept_jetbrains_eula": true });
+        let reject_bool = serde_json::json!({ "accept_jetbrains_eula": false });
+        let reject_string = serde_json::json!({ "accept_jetbrains_eula": "true" });
+
+        assert!(accepts_jetbrains_eula(&Some(accept)));
+        assert!(!accepts_jetbrains_eula(&Some(reject_bool)));
+        // A string is not consent: a typo must not imply accepting a license.
+        assert!(!accepts_jetbrains_eula(&Some(reject_string)));
+        assert!(!accepts_jetbrains_eula(&Some(serde_json::json!({}))));
+        assert!(!accepts_jetbrains_eula(&None));
+    }
 }
 
 zed::register_extension!(IntelliJServerExtension);
