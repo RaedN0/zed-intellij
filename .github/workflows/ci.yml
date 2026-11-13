@@ -34,13 +34,25 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
-      - name: Validate extension.toml
+      - name: Validate manifests
         run: |
           python3 - <<'PY'
           import json, pathlib, sys, tomllib
 
           manifest = tomllib.load(open("extension.toml", "rb"))
           problems = []
+
+          # The native binaries are fetched from the release tagged
+          # `v<CARGO_PKG_VERSION>` (compiled into the wasm), while the registry
+          # advertises extension.toml's version. Letting them drift means either
+          # an unreachable release or an advert for binaries that do not exist,
+          # and the release workflow's guard only fires on tag pushes.
+          cargo_version = tomllib.load(open("Cargo.toml", "rb"))["package"]["version"]
+          if manifest.get("version") != cargo_version:
+              problems.append(
+                  f"extension.toml version {manifest.get('version')} != Cargo.toml "
+                  f"{cargo_version}; binaries come from tag v{cargo_version}"
+              )
           for name, adapter in manifest.get("debug_adapters", {}).items():
               path = adapter.get("schema_path")
               if not path:
@@ -54,7 +66,7 @@ jobs:
                   problems.append(f"{name}: schema_path is not valid JSON: {exc}")
           if problems:
               sys.exit("\n".join(problems))
-          print("extension.toml OK")
+          print(f"manifests OK (version {cargo_version})")
           PY
 
       - name: Format

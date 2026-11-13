@@ -18,7 +18,33 @@ permissions:
   contents: write
 
 jobs:
+  # The extension resolves its binaries under `v<CARGO_PKG_VERSION>
+  # (src/language_servers/util.rs, baked in at compile time) while the steps
+  # below name assets after the pushed tag. If the two disagree the release is
+  # broken in a way no build failure announces:
+  #   tag above the version -> installs look for a release that does not exist
+  #   tag below the version -> installs silently resolve the PREVIOUS release
+  # Refusing the release is much cheaper than either.
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the manifest versions
+        run: |
+          cargo_version="$(python3 -c 'import tomllib;print(tomllib.load(open("Cargo.toml","rb"))["package"]["version"])')"
+          ext_version="$(python3 -c 'import tomllib;print(tomllib.load(open("extension.toml","rb"))["version"])')"
+          echo "tag=${GITHUB_REF_NAME}  Cargo.toml=${cargo_version}  extension.toml=${ext_version}"
+          if [ "v${cargo_version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${cargo_version}. The extension resolves v<CARGO_PKG_VERSION>, so this release would be unreachable."
+            exit 1
+          fi
+          if [ "${ext_version}" != "${cargo_version}" ]; then
+            echo "::error::extension.toml says ${ext_version} but Cargo.toml says ${cargo_version}. The registry would advertise a version whose binaries do not exist."
+            exit 1
+          fi
+
   build:
+    needs: guard
     strategy:
       fail-fast: false
       matrix:
