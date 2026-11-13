@@ -416,13 +416,18 @@ impl zed::Extension for IntelliJServerExtension {
         // extracted release download. A dev reinstall wipes bin/, but the
         // extension re-downloads from the pinned GitHub release on demand — no
         // manual reseeding.
+        // Must be absolute: Zed spawns a debug adapter with the worktree as cwd
+        // and does not resolve relative paths against the extension work dir the
+        // way it does for language servers (see `util::ensure_absolute_native_binary`).
         let bridge = match user_installed_path {
             Some(path) => std::path::PathBuf::from(path),
-            None => util::ensure_native_binary("intellij-dap-bridge")?.ok_or_else(|| {
-                "intellij-dap-bridge missing after release download; rebuild bridge/ in the \
+            None => {
+                util::ensure_absolute_native_binary("intellij-dap-bridge")?.ok_or_else(|| {
+                    "intellij-dap-bridge missing after release download; rebuild bridge/ in the \
                  zed-intellij repo and attach a fixed archive to the release, then retry"
-                    .to_string()
-            })?,
+                        .to_string()
+                })?
+            }
         };
         // `user_installed_path` is not validated by Zed — make sure it exists.
         if !bridge.is_file() {

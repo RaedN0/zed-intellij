@@ -52,12 +52,57 @@ pub(super) fn find_native_binary(executable: &str) -> Result<Option<PathBuf>, St
 /// wipes `bin/` entirely. Callers decide how to treat failure: the proxy
 /// degrades to launching intellij-server directly, the bridge (required for
 /// debugging) surfaces the error to the user.
+/// Same as [`ensure_native_binary`], but guaranteed absolute — use this for
+/// debug adapters, which Zed does not resolve relative to the work dir.
+pub(crate) fn ensure_absolute_native_binary(executable: &str) -> Result<Option<PathBuf>, String> {
+    match ensure_native_binary(executable)? {
+        Some(path) => Ok(Some(absolute_binary_path(&path)?)),
+        None => Ok(None),
+    }
+}
+
 pub(crate) fn ensure_native_binary(executable: &str) -> Result<Option<PathBuf>, String> {
     if let Some(path) = find_native_binary(executable)? {
         return Ok(Some(path));
     }
     download_release_binaries()?;
     find_native_binary(executable)
+}
+
+/// Absolute path to a binary that Zed will spawn with an arbitrary working
+/// directory.
+///
+/// Zed resolves a *language server* command's relative path against the
+/// extension work dir, but a debug adapter command is spawned as given, so
+/// `bin/<exec>` fails with ENOENT the moment a debug session starts. The work
+/// dir is the guest's current directory (the same assumption
+/// zed-extensions/ruby's bundled `rdbg` adapter makes), so joining it gives the
+/// host path Zed needs.
+///
+/// Note `fs::canonicalize` is *not* usable here: inside the guest it resolves
+/// preopen-relative paths, returning `/bin/<exec>` rather than the host path.
+///
+/// The error is deliberately verbose: a wrong work dir here surfaces as an
+/// ENOENT at spawn time, which is indistinguishable from a missing binary.
+fn absolute_binary_path(path: &Path) -> Result<PathBuf, String> {
+    let work_dir = std::env::current_dir().map_err(|e| {
+        format!(
+            "cannot determine the extension work directory to resolve {} ({e}); the debug \
+             adapter must be an absolute path because Zed spawns it outside the work dir",
+            path.display()
+        )
+    })?;
+    if work_dir == Path::new("/") {
+        return Err(format!(
+            "the extension work directory is not exposed to this extension (current_dir() = \
+             {:?}, temp_dir() = {:?}), so {} cannot be turned into the absolute path the debug \
+             adapter needs; report this: it means the host preopens the work dir anonymously",
+            work_dir,
+            std::env::temp_dir(),
+            path.display()
+        ));
+    }
+    Ok(work_dir.join(path))
 }
 
 /// Download the platform archive for this extension's exact release tag and
