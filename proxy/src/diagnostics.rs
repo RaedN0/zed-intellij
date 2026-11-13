@@ -213,7 +213,10 @@ impl DiagnosticCache {
                 by_key.entry(key).or_insert(diagnostic);
             }
             if let Some((code, message)) = code_and_message(diagnostic) {
-                by_message.entry((code, message)).or_default().push(diagnostic);
+                by_message
+                    .entry((code, message))
+                    .or_default()
+                    .push(diagnostic);
             }
         }
         if by_key.is_empty() {
@@ -312,7 +315,10 @@ fn overlaps(diagnostic: &Value, range: &Value) -> bool {
 
 /// `(line, character)` of an LSP position object.
 fn line_col(point: &Value) -> Option<(i64, i64)> {
-    Some((point.get("line")?.as_i64()?, point.get("character")?.as_i64()?))
+    Some((
+        point.get("line")?.as_i64()?,
+        point.get("character")?.as_i64()?,
+    ))
 }
 
 /// `Diagnostic.code` is `NumberOrString`; normalise it so a client that
@@ -377,7 +383,12 @@ mod tests {
     #[test]
     fn fills_missing_data_from_publish() {
         let mut cache = DiagnosticCache::default();
-        cache.record_published(&mut published_params("file:///a/Bar.java", "reference.unresolved", 5, "Cannot resolve symbol 'Widget'"));
+        cache.record_published(&mut published_params(
+            "file:///a/Bar.java",
+            "reference.unresolved",
+            5,
+            "Cannot resolve symbol 'Widget'",
+        ));
         let mut request = code_action("file:///a/Bar.java", "reference.unresolved", 5, false);
         assert!(cache.reinject(&mut request));
         assert_eq!(
@@ -389,7 +400,12 @@ mod tests {
     #[test]
     fn leaves_client_supplied_data_alone() {
         let mut cache = DiagnosticCache::default();
-        cache.record_published(&mut published_params("file:///a/Bar.java", "reference.unresolved", 5, "Cannot resolve symbol 'Widget'"));
+        cache.record_published(&mut published_params(
+            "file:///a/Bar.java",
+            "reference.unresolved",
+            5,
+            "Cannot resolve symbol 'Widget'",
+        ));
         let mut request = code_action("file:///a/Bar.java", "reference.unresolved", 5, true);
         assert!(!cache.reinject(&mut request));
         assert_eq!(
@@ -401,8 +417,14 @@ mod tests {
     #[test]
     fn matches_other_documents_and_unknown_codes_by_nothing() {
         let mut cache = DiagnosticCache::default();
-        cache.record_published(&mut published_params("file:///a/Bar.java", "reference.unresolved", 5, "x"));
-        let mut other_document = code_action("file:///a/Other.java", "reference.unresolved", 5, false);
+        cache.record_published(&mut published_params(
+            "file:///a/Bar.java",
+            "reference.unresolved",
+            5,
+            "x",
+        ));
+        let mut other_document =
+            code_action("file:///a/Other.java", "reference.unresolved", 5, false);
         assert!(!cache.reinject(&mut other_document));
         let mut other_code = code_action("file:///a/Bar.java", "call.unresolved.name", 5, false);
         assert!(!cache.reinject(&mut other_code));
@@ -411,7 +433,12 @@ mod tests {
     #[test]
     fn matches_drifted_range_by_unique_code_and_message() {
         let mut cache = DiagnosticCache::default();
-        cache.record_published(&mut published_params("file:///a/Bar.java", "reference.unresolved", 5, "Cannot resolve symbol 'Widget'"));
+        cache.record_published(&mut published_params(
+            "file:///a/Bar.java",
+            "reference.unresolved",
+            5,
+            "Cannot resolve symbol 'Widget'",
+        ));
         let mut request = code_action("file:///a/Bar.java", "reference.unresolved", 9, false);
         assert!(cache.reinject(&mut request));
     }
@@ -419,7 +446,12 @@ mod tests {
     #[test]
     fn ignores_non_code_action_messages() {
         let mut cache = DiagnosticCache::default();
-        cache.record_published(&mut published_params("file:///a/Bar.java", "reference.unresolved", 5, "x"));
+        cache.record_published(&mut published_params(
+            "file:///a/Bar.java",
+            "reference.unresolved",
+            5,
+            "x",
+        ));
         let mut definition = json!({
             "jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
             "params": { "textDocument": { "uri": "file:///a/Bar.java" } }
@@ -466,7 +498,13 @@ mod tests {
         // The captured bug: caret exactly on the diagnostic's first character,
         // so Zed's strict range test drops it and sends `diagnostics: []`.
         let mut cache = DiagnosticCache::default();
-        cache.record_published(&mut published_at("file:///a/Bar.java", "reference.unresolved", 40, 87, 98));
+        cache.record_published(&mut published_at(
+            "file:///a/Bar.java",
+            "reference.unresolved",
+            40,
+            87,
+            98,
+        ));
         let mut request = code_action_at("file:///a/Bar.java", 40, 87, json!([]));
         assert!(cache.supplement(&mut request));
         assert_eq!(
@@ -478,7 +516,13 @@ mod tests {
     #[test]
     fn supplement_leaves_client_supplied_diagnostics_alone() {
         let mut cache = DiagnosticCache::default();
-        cache.record_published(&mut published_at("file:///a/Bar.java", "reference.unresolved", 40, 87, 98));
+        cache.record_published(&mut published_at(
+            "file:///a/Bar.java",
+            "reference.unresolved",
+            40,
+            87,
+            98,
+        ));
         let sent = json!([{
             "range": {
                 "start": { "line": 40, "character": 87 },
@@ -500,7 +544,13 @@ mod tests {
     #[test]
     fn supplement_ignores_diagnostics_away_from_the_caret() {
         let mut cache = DiagnosticCache::default();
-        cache.record_published(&mut published_at("file:///a/Bar.java", "reference.unresolved", 40, 87, 98));
+        cache.record_published(&mut published_at(
+            "file:///a/Bar.java",
+            "reference.unresolved",
+            40,
+            87,
+            98,
+        ));
         let mut request = code_action_at("file:///a/Bar.java", 12, 4, json!([]));
         assert!(!cache.supplement(&mut request));
     }
@@ -509,19 +559,26 @@ mod tests {
     fn supplement_adds_only_covering_diagnostics() {
         let mut cache = DiagnosticCache::default();
         let mut published = published_at("file:///a/Bar.java", "reference.unresolved", 40, 87, 98);
-        published["params"]["diagnostics"].as_array_mut().unwrap().push(json!({
-            "range": {
-                "start": { "line": 12, "character": 0 },
-                "end": { "line": 12, "character": 10 }
-            },
-            "code": "call.unresolved.name",
-            "message": "Cannot resolve method 'spin()'",
-            "data": { "fixes": [] }
-        }));
+        published["params"]["diagnostics"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "range": {
+                    "start": { "line": 12, "character": 0 },
+                    "end": { "line": 12, "character": 10 }
+                },
+                "code": "call.unresolved.name",
+                "message": "Cannot resolve method 'spin()'",
+                "data": { "fixes": [] }
+            }));
         cache.record_published(&mut published);
         let mut request = code_action_at("file:///a/Bar.java", 40, 90, json!([]));
         assert!(cache.supplement(&mut request));
-        let added = request.pointer("/params/context/diagnostics").unwrap().as_array().unwrap();
+        let added = request
+            .pointer("/params/context/diagnostics")
+            .unwrap()
+            .as_array()
+            .unwrap();
         assert_eq!(added.len(), 1);
         assert_eq!(added[0]["code"], json!("reference.unresolved"));
     }

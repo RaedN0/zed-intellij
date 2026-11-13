@@ -165,10 +165,12 @@ impl ControlHub {
                 // (the class document lookup) is under "result".
                 match resp.get("result").and_then(|r| r.get("uri")).cloned() {
                     Some(uri) => uri,
-                    None => return BridgeReply::Err(format!(
-                        "resolveClassDocument returned no uri: {}",
-                        serde_json::to_string(&resp.get("result")).unwrap_or_default()
-                    )),
+                    None => {
+                        return BridgeReply::Err(format!(
+                            "resolveClassDocument returned no uri: {}",
+                            serde_json::to_string(&resp.get("result")).unwrap_or_default()
+                        ))
+                    }
                 }
             }
         };
@@ -183,7 +185,13 @@ impl ControlHub {
             launch_arg["cwd"] = cwd.clone();
         }
         let mut overrides = serde_json::Map::new();
-        for key in ["classPaths", "modulePaths", "moduleName", "javaExec", "vmArgs"] {
+        for key in [
+            "classPaths",
+            "modulePaths",
+            "moduleName",
+            "javaExec",
+            "vmArgs",
+        ] {
             if let Some(v) = cfg.get(key).filter(|v| !v.is_null()) {
                 overrides.insert(key.to_string(), v.clone());
             }
@@ -217,19 +225,33 @@ impl ControlHub {
         merge(&mut merged, "javaExec", resolved.get("javaExec"));
         merge(&mut merged, "classPaths", resolved.get("classpath"));
         merge(&mut merged, "modulePaths", resolved.get("modulePath"));
-        merge(&mut merged, "moduleContentPaths", resolved.get("moduleContentPaths"));
+        merge(
+            &mut merged,
+            "moduleContentPaths",
+            resolved.get("moduleContentPaths"),
+        );
         merge(&mut merged, "vmArgs", resolved.get("vmArgs"));
         if let Some(name) = resolved.get("moduleName") {
             if name.is_string() {
                 merged["moduleName"] = name.clone();
             }
         }
-        if merged.get("cwd").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if merged
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .is_empty()
+        {
             if let Some(wd) = resolved.get("workingDirectory") {
                 merged["cwd"] = wd.clone();
             }
         }
-        if merged.get("javaExec").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if merged
+            .get("javaExec")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .is_empty()
+        {
             return BridgeReply::Err("resolveLaunch produced no javaExec".into());
         }
         BridgeReply::Ok(merged)
@@ -245,9 +267,7 @@ impl ControlHub {
         };
         match resp.get("result") {
             Some(Value::Number(n)) => BridgeReply::Port(Value::Number(n.clone())),
-            Some(other) => {
-                BridgeReply::Err(format!("start_debug_server returned {other}"))
-            }
+            Some(other) => BridgeReply::Err(format!("start_debug_server returned {other}")),
             None => BridgeReply::Err("start_debug_server returned no result".into()),
         }
     }
@@ -274,7 +294,10 @@ impl ControlHub {
                 if let Some(err) = response.get("error") {
                     return Err(format!(
                         "{} failed: {}",
-                        params.get("command").and_then(|c| c.as_str()).unwrap_or("command"),
+                        params
+                            .get("command")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("command"),
                         err
                     ));
                 }

@@ -15,7 +15,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
 
@@ -32,8 +32,7 @@ fn cfr_jar() -> Option<PathBuf> {
         }
     }
     let home = env::var_os("HOME")?;
-    let p = PathBuf::from(home)
-        .join(".local/share/zed-kotlin-patches/cfr/cfr-0.152.jar");
+    let p = PathBuf::from(home).join(".local/share/zed-kotlin-patches/cfr/cfr-0.152.jar");
     p.is_file().then_some(p)
 }
 
@@ -50,7 +49,7 @@ fn java_binary() -> PathBuf {
 
 /// Decompiled companion path for an extracted `.class` (end in `.java` so Zed
 /// renders it with the Java grammar).
-fn decompiled_path(class_path: &PathBuf) -> PathBuf {
+fn decompiled_path(class_path: &Path) -> PathBuf {
     let mut s = class_path.to_string_lossy().into_owned();
     s.push_str(".java");
     PathBuf::from(s)
@@ -92,7 +91,7 @@ pub fn rewrite_archive_locations(msg: &mut Value) -> bool {
 /// extraction fails (caller then leaves the original URI untouched).
 pub fn resolve_archive_uri(uri: &str) -> Option<String> {
     let (archive_uri, inner) = split_archive_uri(uri)?;
-    let archive_path = uri_to_path(&archive_uri);
+    let archive_path = uri_to_path(archive_uri);
     let inner = percent_decode(inner.trim_start_matches('/'));
 
     let file_name = inner.rsplit('/').next().unwrap_or("Unknown");
@@ -195,7 +194,7 @@ fn read_zip_entry(archive: &str, inner: &str) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn path_to_file_uri(path: &PathBuf) -> String {
+fn path_to_file_uri(path: &Path) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
     if s.starts_with('/') {
         format!("file://{s}")
@@ -266,13 +265,19 @@ mod tests {
 
     #[test]
     fn strips_file_scheme() {
-        assert_eq!(uri_to_path("file:///opt/jdk/lib/src.zip"), "/opt/jdk/lib/src.zip");
+        assert_eq!(
+            uri_to_path("file:///opt/jdk/lib/src.zip"),
+            "/opt/jdk/lib/src.zip"
+        );
     }
 
     #[test]
     fn strips_jar_scheme() {
         // kotlin-lsp's actual scheme for archive locations, confirmed via live probing.
-        assert_eq!(uri_to_path("jar:///opt/jdk/lib/src.zip"), "/opt/jdk/lib/src.zip");
+        assert_eq!(
+            uri_to_path("jar:///opt/jdk/lib/src.zip"),
+            "/opt/jdk/lib/src.zip"
+        );
     }
 
     #[test]

@@ -66,23 +66,17 @@ impl IntelliJServer {
     /// [`language_server_binary_path`](Self::language_server_binary_path) — the
     /// sandbox can only stat paths inside it.
     pub fn bundled_java_home(&self) -> Option<String> {
-        let extension_dir = format!(
-            "{}-{}",
-            Self::LANGUAGE_SERVER_ID,
-            Self::SERVER_VERSION
-        );
+        let extension_dir = format!("{}-{}", Self::LANGUAGE_SERVER_ID, Self::SERVER_VERSION);
         let distro = locate_server_home(&extension_dir, exe_suffix())?;
         // macOS keeps the JDK under Contents/Home, Linux/Windows use jbr itself.
         let candidates = [
             format!("{distro}/jbr/Contents/Home"),
             format!("{distro}/jbr"),
         ];
-        candidates
-            .into_iter()
-            .find(|home| {
-                let java = format!("{home}/bin/java{}", exe_suffix());
-                fs::metadata(&java).is_ok_and(|metadata| metadata.is_file())
-            })
+        candidates.into_iter().find(|home| {
+            let java = format!("{home}/bin/java{}", exe_suffix());
+            fs::metadata(&java).is_ok_and(|metadata| metadata.is_file())
+        })
     }
 
     /// The EULA acceptance hash to pass as `--eula=<hash>`.

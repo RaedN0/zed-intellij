@@ -124,7 +124,8 @@ fn main() {
                             {
                                 if let (Some(id), Some(uri)) = (
                                     msg.get("id").and_then(Value::as_i64),
-                                    msg.pointer("/params/textDocument/uri").and_then(Value::as_str),
+                                    msg.pointer("/params/textDocument/uri")
+                                        .and_then(Value::as_str),
                                 ) {
                                     cache_in.lock().unwrap().track_pull(id, uri.to_owned());
                                 }
@@ -227,10 +228,7 @@ fn main() {
                     }
 
                     // Responses to control-channel requests never reach Zed.
-                    if id
-                        .as_i64()
-                        .is_some_and(|n| n >= control::CTRL_ID_BASE)
-                    {
+                    if id.as_i64().is_some_and(|n| n >= control::CTRL_ID_BASE) {
                         if let Some(hub) = hub_slot_out.lock().unwrap().as_ref() {
                             if let Some(msg) = parse_lsp_content(&raw) {
                                 if hub.intercept_response(&msg) {

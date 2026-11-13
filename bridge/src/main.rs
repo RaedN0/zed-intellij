@@ -26,8 +26,7 @@ use std::{
     net::TcpStream,
     os::unix::net::UnixStream,
     path::Path,
-    process,
-    thread,
+    process, thread,
     time::{Duration, Instant},
 };
 
@@ -80,27 +79,37 @@ fn main() {
         die("failed to send START to the proxy control socket");
     }
     let mut reply = String::new();
-    if control.read_to_string(&mut reply).map(|n| n == 0).unwrap_or(true) {
+    if control
+        .read_to_string(&mut reply)
+        .map(|n| n == 0)
+        .unwrap_or(true)
+    {
         die("the proxy closed the control socket without a reply");
     }
     let reply = reply.trim();
     trace(&format!("control reply: {reply}"));
     let port: u16 = match reply.strip_prefix("PORT ") {
-        Some(p) => p.parse().unwrap_or_else(|_| die(&format!("malformed proxy reply: {reply:?}"))),
+        Some(p) => p
+            .parse()
+            .unwrap_or_else(|_| die(&format!("malformed proxy reply: {reply:?}"))),
         None => die(&format!("proxy refused to start the debug server: {reply}")),
     };
     trace(&format!("IntelliJ debug endpoint at 127.0.0.1:{port}"));
 
     // 2. the real DAP endpoint
-    let mut dap = TcpStream::connect(("127.0.0.1", port)).unwrap_or_else(|e| die(&format!(
-        "cannot connect to intellij-server's debug endpoint at port {port}: {e}"
-    )));
+    let mut dap = TcpStream::connect(("127.0.0.1", port)).unwrap_or_else(|e| {
+        die(&format!(
+            "cannot connect to intellij-server's debug endpoint at port {port}: {e}"
+        ))
+    });
     dap.set_nodelay(true).ok();
 
     // 3. rewrite the first DAP message (initialize) to the expected adapter id
-    let first = read_message(std::io::stdin()).unwrap_or_else(|e| die(&format!("Zed sent no DAP message: {e}")));
+    let first = read_message(std::io::stdin())
+        .unwrap_or_else(|e| die(&format!("Zed sent no DAP message: {e}")));
     let rewritten = rewrite_initialize(&first);
-    dap.write_all(&rewritten).unwrap_or_else(|e| die(&format!("DAP endpoint died on initialize: {e}")));
+    dap.write_all(&rewritten)
+        .unwrap_or_else(|e| die(&format!("DAP endpoint died on initialize: {e}")));
 
     // 4. pumps. Zed -> server is frame-aware: DAP `launch` requests that lack
     //    `javaExec` (Zed/the server never resolve those themselves) get resolved
@@ -108,7 +117,9 @@ fn main() {
     //    VS Code client does (`intellij.java.resolveClassDocument` +
     //    `.resolveLaunch`) before sending the launch. Everything else forwards
     //    verbatim; server -> Zed is a raw byte pump.
-    let mut tcp_in = dap.try_clone().unwrap_or_else(|e| die(&format!("tcp clone failed: {e}")));
+    let mut tcp_in = dap
+        .try_clone()
+        .unwrap_or_else(|e| die(&format!("tcp clone failed: {e}")));
     let pump_sock = sock_path.clone();
     thread::spawn(move || {
         let mut stdin = std::io::stdin();
@@ -191,14 +202,16 @@ fn intercept_launch(frame: &[u8], sock_path: &Path) -> Option<Vec<u8>> {
     let mut control = UnixStream::connect(sock_path).ok()?;
     let body = serde_json::to_vec(&args).ok()?;
     control
-        .write_all(format!("RESOLVE ", ).as_bytes())
+        .write_all(b"RESOLVE ")
         .and_then(|_| control.write_all(&body))
         .and_then(|_| control.write_all(b"\n"))
         .and_then(|_| control.flush())
         .ok()?;
     let mut reply = String::new();
     use std::io::BufRead;
-    std::io::BufReader::new(control).read_line(&mut reply).ok()?;
+    std::io::BufReader::new(control)
+        .read_line(&mut reply)
+        .ok()?;
     let reply = reply.trim();
     if let Some(err) = reply.strip_prefix("ERR ") {
         trace(&format!("resolve FAILED: {err} (forwarding unresolved)"));
@@ -295,7 +308,11 @@ fn rewrite_initialize(msg: &[u8]) -> Vec<u8> {
     if !is_initialize {
         return msg.to_vec();
     }
-    if !value.get("arguments").map(Value::is_object).unwrap_or(false) {
+    if !value
+        .get("arguments")
+        .map(Value::is_object)
+        .unwrap_or(false)
+    {
         value["arguments"] = json!({});
     }
     value["arguments"]["adapterID"] = json!(ADAPTER_ID);

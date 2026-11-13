@@ -76,7 +76,9 @@ struct IdOnly {
 /// Returns `None` for notifications (no `id`) and unparseable bodies.
 pub fn parse_lsp_id(raw: &[u8]) -> Option<Value> {
     let sep_pos = raw.windows(4).position(|w| w == HEADER_SEP)?;
-    serde_json::from_slice::<IdOnly>(&raw[sep_pos + 4..]).ok()?.id
+    serde_json::from_slice::<IdOnly>(&raw[sep_pos + 4..])
+        .ok()?
+        .id
 }
 
 /// Cheap check for the presence of an `"id"` key in the JSON body of a raw LSP

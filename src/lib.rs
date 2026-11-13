@@ -4,7 +4,7 @@ use zed_extension_api::{self as zed, settings::LspSettings, Result};
 
 mod language_servers;
 
-use language_servers::{IntelliJServer, Proxy, util};
+use language_servers::{util, IntelliJServer, Proxy};
 
 /// Resolve the JDK home for this worktree, in priority order:
 ///
@@ -115,9 +115,7 @@ impl zed::Extension for IntelliJServerExtension {
     ) -> zed::Result<zed::Command> {
         match language_server_id.as_ref() {
             IntelliJServer::LANGUAGE_SERVER_ID => {
-                let intellij_server = self
-                    .intellij_server
-                    .get_or_insert_with(IntelliJServer::new);
+                let intellij_server = self.intellij_server.get_or_insert_with(IntelliJServer::new);
 
                 // Per-project settings from `lsp.intellij-server` in settings.json:
                 // `accept_jetbrains_eula` (consent gate, evaluated first),
@@ -143,15 +141,19 @@ impl zed::Extension for IntelliJServerExtension {
                     return Err(EULA_GATE_MESSAGE.to_string());
                 }
 
-                let binary_path = intellij_server.language_server_binary_path(language_server_id)?;
+                let binary_path =
+                    intellij_server.language_server_binary_path(language_server_id)?;
 
                 // JetBrains intellij-server ("Java and Kotlin by IntelliJ IDEA"):
                 // serves Java AND Kotlin buffers from the same engine and project
                 // model. The launcher enforces the bundled EULA before the LSP
                 // handshake; `--eula=<sha256(EULA.txt)[:16]>` records acceptance
                 // for this user+machine. Telemetry stays off.
-                let java_home =
-                    resolve_java_home(&configuration, worktree, intellij_server.bundled_java_home())?;
+                let java_home = resolve_java_home(
+                    &configuration,
+                    worktree,
+                    intellij_server.bundled_java_home(),
+                )?;
 
                 // The accepted hash is derived from the EULA.txt of the
                 // *installed* distribution (see `IntelliJServer::eula_hash`), so
@@ -167,7 +169,10 @@ impl zed::Extension for IntelliJServerExtension {
                     // JB_MAVEN_JAVA_HOME system property first (same mechanism as
                     // kotlin-lsp; IJ_JAVA_OPTIONS is honored by the JetBrains
                     // launcher and passed as a JVM arg).
-                    ("IJ_JAVA_OPTIONS".to_string(), java_options(&configuration, &java_home)),
+                    (
+                        "IJ_JAVA_OPTIONS".to_string(),
+                        java_options(&configuration, &java_home),
+                    ),
                 ];
 
                 // Run intellij-server behind kotlin-lsp-proxy, which rewrites
@@ -231,9 +236,10 @@ impl zed::Extension for IntelliJServerExtension {
                 // resolution order as the launcher env (per-project `java_home`,
                 // shell env); `lsp.intellij-server.initialization_options` still
                 // overrides wholesale.
-                let configuration = LspSettings::for_worktree(language_server_id.as_ref(), worktree)
-                    .ok()
-                    .and_then(|lsp_settings| lsp_settings.settings);
+                let configuration =
+                    LspSettings::for_worktree(language_server_id.as_ref(), worktree)
+                        .ok()
+                        .and_then(|lsp_settings| lsp_settings.settings);
                 // Same gate as `language_server_command`: never hand the server
                 // an SDK until the user has accepted the license.
                 if !accepts_jetbrains_eula(&configuration) {
@@ -292,8 +298,8 @@ impl zed::Extension for IntelliJServerExtension {
         }
 
         // The user's debug.json body for this scenario (a JSON string).
-        let mut cfg: serde_json::Value = serde_json::from_str(&config.config)
-            .unwrap_or_else(|_| serde_json::json!({}));
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&config.config).unwrap_or_else(|_| serde_json::json!({}));
         if !cfg.is_object() {
             cfg = serde_json::json!({});
         }
@@ -304,8 +310,7 @@ impl zed::Extension for IntelliJServerExtension {
         obj.entry("console")
             .or_insert(serde_json::json!("internalConsole"));
         // The server's DAP implementation looks these up for launch configs.
-        obj.entry("request")
-            .or_insert(serde_json::json!("launch"));
+        obj.entry("request").or_insert(serde_json::json!("launch"));
 
         let request = if obj.get("request").and_then(|v| v.as_str()) == Some("attach") {
             zed::StartDebuggingRequestArgumentsRequest::Attach
@@ -404,5 +409,3 @@ mod tests {
 }
 
 zed::register_extension!(IntelliJServerExtension);
-
-
