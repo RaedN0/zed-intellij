@@ -90,6 +90,87 @@ fn accepts_jetbrains_eula(configuration: &Option<serde_json::Value>) -> bool {
         .unwrap_or(false)
 }
 
+/// Fields beyond `defaultSdk` that the server reads out of the `initialize`
+/// payload — the same shape JetBrains' own VS Code client sends in
+/// `buildInitializationOptions`.
+///
+/// - `intellij.projects` (array of `{ type, path }`) tells the server which
+///   sub-projects to import. Without it a monorepo's nested build files are
+///   invisible: the server imports the worktree root as a single project and
+///   every module below it resolves against the wrong model.
+/// - `intellij.buildTool` (`"gradle"`, `"maven"`, `"bazel"`, or `""` to
+///   disable detection) is sent as a per-folder map. It only matters when
+///   detection picks the wrong one or finds none. An empty string is forwarded
+///   deliberately: it is the documented way to turn detection off, so it cannot
+///   be treated as "unset".
+///
+/// Both are forwarded verbatim when present; the server validates the shape.
+/// Pure so the mapping is testable without a `Worktree`.
+fn workspace_init_options(
+    configuration: &Option<serde_json::Value>,
+    root_uri: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let setting = |name: &str| {
+        configuration
+            .as_ref()
+            .and_then(|settings| settings.pointer(name))
+    };
+
+    let mut init = serde_json::Map::new();
+
+    if let Some(projects) = setting("/intellij.projects").filter(|value| !value.is_null()) {
+        init.insert("projects".to_string(), projects.clone());
+    }
+
+    // `buildTool` is accepted as an alias, matching the upstream setting that
+    // predates the `intellij.` prefix.
+    let build_tool = setting("/intellij.buildTool")
+        .or_else(|| setting("/buildTool"))
+        .and_then(|value| value.as_str());
+    if let Some(build_tool) = build_tool {
+        // Keyed by the worktree folder URI the server saw in `initialize` —
+        // it matches this map against that folder, not against a path.
+        let mut folders = serde_json::Map::new();
+        folders.insert(
+            root_uri.to_string(),
+            serde_json::Value::String(build_tool.to_string()),
+        );
+        init.insert("buildTools".to_string(), serde_json::Value::Object(folders));
+    }
+
+    init
+}
+
+/// `file://` URI for an absolute path, matching what Zed sends as `rootUri`.
+///
+/// Paths are percent-encoded apart from RFC 3986's unreserved set plus `/` and
+/// `:`, so a worktree with a space or `#` in it produces the same URI Zed sent.
+/// That matters because the server compares this string against its own folder
+/// URI: `file:///a b` would never match `file:///a%20b`, and `buildTools` would
+/// be silently ignored. (The DAP bridge derives its own URI without encoding —
+/// it only feeds a local socket key, never a server-side comparison.)
+fn path_to_file_uri(path: &str) -> String {
+    let normalised = path.replace('\\', "/");
+    let normalised = normalised
+        .strip_prefix("file://")
+        .unwrap_or(normalised.as_str());
+
+    let mut uri = String::from("file://");
+    if !normalised.starts_with('/') {
+        // Windows drive letter: `C:/dir` → `file:///C:/dir`.
+        uri.push('/');
+    }
+    for byte in normalised.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+                uri.push(byte as char);
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri
+}
+
 /// The adapter id intellij-server's debugger lookup expects — also the name
 /// registered under [debug_adapters] in extension.toml and used as the
 /// `adapter` field of debug configurations in .zed/debug.json.
@@ -249,9 +330,21 @@ impl zed::Extension for IntelliJServerExtension {
                     .intellij_server
                     .get_or_insert_with(IntelliJServer::new)
                     .bundled_java_home();
-                Ok(Some(serde_json::json!({
-                    "defaultSdk": resolve_java_home(&configuration, worktree, bundled)?,
-                })))
+
+                let mut init = serde_json::Map::new();
+                init.insert(
+                    "defaultSdk".to_string(),
+                    serde_json::Value::String(resolve_java_home(
+                        &configuration,
+                        worktree,
+                        bundled,
+                    )?),
+                );
+                init.extend(workspace_init_options(
+                    &configuration,
+                    &path_to_file_uri(&worktree.root_path()),
+                ));
+                Ok(Some(serde_json::Value::Object(init)))
             }
             _ => Ok(None),
         }
@@ -392,6 +485,72 @@ fn java_options(configuration: &Option<serde_json::Value>, java_home: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_uri_matches_what_zed_sends_as_root_uri() {
+        assert_eq!(path_to_file_uri("/Users/me/proj"), "file:///Users/me/proj");
+        // Encoded, because the server compares this against its own folder URI.
+        assert_eq!(
+            path_to_file_uri("/Users/me/my project"),
+            "file:///Users/me/my%20project"
+        );
+        assert_eq!(path_to_file_uri("/tmp/a#b"), "file:///tmp/a%23b");
+        // Already a URI: normalised, not prefixed twice.
+        assert_eq!(
+            path_to_file_uri("file:///Users/me/my project"),
+            "file:///Users/me/my%20project"
+        );
+        // Windows drive letters keep the colon and gain the third slash.
+        assert_eq!(path_to_file_uri("C:\\src\\proj"), "file:///C:/src/proj");
+    }
+
+    #[test]
+    fn monorepo_projects_are_forwarded_verbatim() {
+        let projects = serde_json::json!([
+            { "type": "gradle", "path": "." },
+            { "type": "maven", "path": "services/api" }
+        ]);
+        let settings = Some(serde_json::json!({ "intellij.projects": projects }));
+        let init = workspace_init_options(&settings, "file:///repo");
+        assert_eq!(init.get("projects"), Some(&projects));
+        assert_eq!(init.get("buildTools"), None);
+    }
+
+    #[test]
+    fn build_tool_is_keyed_by_worktree_uri() {
+        let settings = Some(serde_json::json!({ "intellij.buildTool": "gradle" }));
+        assert_eq!(
+            workspace_init_options(&settings, "file:///repo").get("buildTools"),
+            Some(&serde_json::json!({ "file:///repo": "gradle" }))
+        );
+    }
+
+    #[test]
+    fn build_tool_accepts_unprefixed_alias_and_empty_means_disabled() {
+        let alias = Some(serde_json::json!({ "buildTool": "maven" }));
+        assert_eq!(
+            workspace_init_options(&alias, "file:///r").get("buildTools"),
+            Some(&serde_json::json!({ "file:///r": "maven" }))
+        );
+        // "" disables detection, so it has to reach the server as a mapping.
+        let disabled = Some(serde_json::json!({ "intellij.buildTool": "" }));
+        assert_eq!(
+            workspace_init_options(&disabled, "file:///r").get("buildTools"),
+            Some(&serde_json::json!({ "file:///r": "" }))
+        );
+    }
+
+    #[test]
+    fn no_monorepo_settings_present_adds_nothing() {
+        assert!(workspace_init_options(&None, "file:///repo").is_empty());
+        assert!(workspace_init_options(&Some(serde_json::json!({})), "file:///repo").is_empty());
+        // null means "not set", not "forward null to the server".
+        assert!(workspace_init_options(
+            &Some(serde_json::json!({ "intellij.projects": null })),
+            "file:///repo"
+        )
+        .is_empty());
+    }
 
     #[test]
     fn eula_gate_requires_a_literal_true() {

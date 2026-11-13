@@ -144,6 +144,41 @@ release's binaries.
   before a distribution has been extracted.
 - `lsp.intellij-server.settings.vm_options` tunes server JVM flags;
   `lsp.intellij-server.settings.proxy_path` overrides the proxy binary.
+- Telemetry is off unconditionally (`INTELLIJ_DATA_SHARING=none`). Unlike the
+  JetBrains client there is no opt-in setting: accepting the EULA is one axis,
+  sending usage data is another, and this extension only ever does the first.
+
+### Monorepos and build tools
+
+The server imports the worktree root as one project unless it is told
+otherwise, so in a monorepo the modules below the root resolve against a model
+built from the root alone. Two settings map onto the same initialization
+options JetBrains' own VS Code client sends:
+
+```json
+{
+  "lsp": {
+    "intellij-server": {
+      "settings": {
+        "intellij.projects": [
+          { "type": "gradle", "path": "." },
+          { "type": "maven", "path": "services/api" }
+        ],
+        "intellij.buildTool": "gradle"
+      }
+    }
+  }
+}
+```
+
+- `intellij.projects` — array of `{ type, path }` entries with `path` relative
+  to the worktree root. This is what makes nested build files visible.
+- `intellij.buildTool` — `"gradle"`, `"maven"`, `"bazel"`, or `""` to disable
+  detection. Forwarded as a per-folder map keyed by the worktree's `file://`
+  URI, so it applies to this project only; an empty string is sent deliberately,
+  since it is how detection gets turned off. `buildTool` without the prefix is
+  accepted as an alias. Only needed when detection picks the wrong tool or finds
+  none.
 
 ## Disclaimer
 
