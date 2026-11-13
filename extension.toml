@@ -1,7 +1,7 @@
 id = "intellij-server"
 name = "IntelliJ Server (Java and Kotlin)"
 description = "JetBrains' standalone IntelliJ language server for Java and Kotlin ('Java and Kotlin by IntelliJ IDEA')."
-version = "0.2.0"
+version = "0.3.0"
 schema_version = 1
 authors = ["mschoerghuber"]
 
@@ -15,6 +15,14 @@ authors = ["mschoerghuber"]
 # trial (enforced by the launcher like the EULA). 271 onboards Java/Kotlin
 # source roots itself (the 263-era local importer patch is obsolete) and ships
 # a bundled jbr, used when neither a per-project java_home nor $JAVA_HOME is set.
+#
+# NOTE (0.3.0) — BREAKING: the server is no longer downloaded or launched until
+# `lsp.intellij-server.settings.accept_jetbrains_eula` is set to `true`; consent
+# used to be implied by a hardcoded --eula hash. The hash now comes from the
+# EULA.txt of whichever distribution is installed, and `intellij.projects` /
+# `intellij.buildTool` are forwarded as initialization options so monorepos
+# import correctly. Bump this together with Cargo.toml: the native binaries are
+# fetched from the release tagged `v<version>`, so the two must agree.
 [language_servers.intellij-server]
 name = "IntelliJ Server"
 languages = ["Kotlin", "Java"]
