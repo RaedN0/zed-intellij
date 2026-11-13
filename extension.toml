@@ -36,3 +36,6 @@ languages = ["Kotlin", "Java"]
 # bin/ still win over downloaded copies.
 [debug_adapters.intellij_jvm]
 languages = ["Kotlin", "Java"]
+# Describes the launch/attach bodies accepted in .zed/debug.json; without this
+# Zed has no completions or validation for the debug configuration.
+schema_path = "debug_adapter_schemas/intellij_jvm.json"
