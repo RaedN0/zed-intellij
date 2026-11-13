@@ -4,17 +4,17 @@ use zed_extension_api::{self as zed, serde_json::Value, Worktree};
 
 use crate::language_servers::util;
 
-const PROXY_BINARY: &str = "kotlin-lsp-proxy";
-
-/// Resolves the `kotlin-lsp-proxy` binary that rewrites archive-internal
-/// (`jar!/`, `zip!/`) source URIs returned intellij-server into real files so
-/// Go-to-Definition into library/JDK sources works in Zed
-/// (see zed-extensions/kotlin#106 for the original kotlin-lsp wiring).
+/// Resolves the native binary (`intellij-native`, see
+/// [`util::NATIVE_BINARY`]) that rewrites archive-internal (`jar!/`, `zip!/`)
+/// source URIs returned by intellij-server into real files so Go-to-Definition
+/// into library/JDK sources works in Zed (see zed-extensions/kotlin#106 for the
+/// original kotlin-lsp wiring). The same executable is Zed's debug adapter in
+/// its `dap` mode; only this mode sits on the language-server pipe.
 ///
 /// Resolution order:
 /// 1. `lsp.intellij-server.settings.proxy_path` in settings.json (escape hatch),
-/// 2. `bin/kotlin-lsp-proxy` in the extension work dir (local dev override),
-/// 3. `bin/<version>/kotlin-lsp-proxy` — extracted from the release archive
+/// 2. `bin/intellij-native` in the extension work dir (local dev override),
+/// 3. `bin/<version>/intellij-native` — extracted from the release archive
 ///    downloaded on demand from the GitHub release pinned to this extension's
 ///    version (see `util::ensure_native_binary`; the download also self-heals
 ///    the work dir after a dev reinstall),
@@ -48,7 +48,7 @@ impl Proxy {
             match util::ensure_native_binary(&proxy_exec()) {
                 Ok(path) => path,
                 Err(err) => {
-                    eprintln!("kotlin-lsp-proxy unavailable: {err}");
+                    eprintln!("intellij-native unavailable: {err}");
                     None
                 }
             }
@@ -66,8 +66,8 @@ impl Proxy {
 
 fn proxy_exec() -> String {
     match zed::current_platform().0 {
-        zed::Os::Windows => format!("{PROXY_BINARY}.exe"),
-        _ => PROXY_BINARY.to_string(),
+        zed::Os::Windows => format!("{}.exe", util::NATIVE_BINARY),
+        _ => util::NATIVE_BINARY.to_string(),
     }
 }
 

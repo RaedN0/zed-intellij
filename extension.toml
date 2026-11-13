@@ -1,7 +1,7 @@
 id = "intellij-server"
 name = "IntelliJ Server (Java and Kotlin)"
 description = "JetBrains' standalone IntelliJ language server for Java and Kotlin ('Java and Kotlin by IntelliJ IDEA')."
-version = "0.3.0"
+version = "0.4.0"
 schema_version = 1
 authors = ["mschoerghuber"]
 
@@ -21,24 +21,31 @@ authors = ["mschoerghuber"]
 # used to be implied by a hardcoded --eula hash. The hash now comes from the
 # EULA.txt of whichever distribution is installed, and `intellij.projects` /
 # `intellij.buildTool` are forwarded as initialization options so monorepos
-# import correctly. Bump this together with Cargo.toml: the native binaries are
+# import correctly. Bump this together with Cargo.toml: the native binary is
 # fetched from the release tagged `v<version>`, so the two must agree.
+#
+# NOTE (0.4.0) — the two native helpers are now ONE executable,
+# `intellij-native` (native/ in this repo, was proxy/ + bridge/):
+# `intellij-native <server-bin> [args…]` is the LSP proxy on the pipe and
+# `intellij-native dap <worktree>` is the debug adapter Zed spawns. Still two
+# processes at runtime — the LSP connection owner is what starts the debug
+# endpoint — but one artifact, one download and one release archive entry.
 [language_servers.intellij-server]
 name = "IntelliJ Server"
 languages = ["Kotlin", "Java"]
 
 # The IntelliJ debug engine intellij-server embeds behind its
-# start_debug_server LSP command. Zed side, this adapter is just a bridge
-# process (intellij-dap-bridge) pumping DAP between Zed and the TCP
-# endpoint the proxy asks the server to open. Debug configs in
-# .zed/debug.json use adapter = "intellij_jvm" — the id the server's own
-# debugger lookup expects (the same string VS Code uses as the debug type).
+# start_debug_server LSP command. Zed side, this adapter is the native binary in
+# `dap` mode pumping DAP between Zed and the TCP endpoint the proxy asks the
+# server to open. Debug configs in .zed/debug.json use adapter =
+# "intellij_jvm" — the id the server's own debugger lookup expects (the same
+# string VS Code uses as the debug type).
 #
-# Binaries (kotlin-lsp-proxy + intellij-dap-bridge, resolution in
-# src/language_servers/util.rs) resolve as: bin/<exec> dev override, then
-# bin/<version>/<exec>. When missing, the extension downloads
-# zed-intellij-v<version>-<target-triple>.tar.gz — a flat archive with both
-# binaries, attached to the GitHub release tagged v<version> by
+# The binary (intellij-native, resolution in src/language_servers/util.rs)
+# resolves as: bin/intellij-native dev override, then bin/<version>/intellij-native.
+# When missing, the extension downloads
+# zed-intellij-v<version>-<target-triple>.tar.gz — a flat archive containing that
+# one executable, attached to the GitHub release tagged v<version> by
 # .github/workflows/release.yml — and extracts it into bin/<version>/.
 # Dev reinstalls that wipe bin/ therefore self-heal; local overrides in
 # bin/ still win over downloaded copies.

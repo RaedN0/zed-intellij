@@ -81,23 +81,23 @@ jobs:
       - name: Build
         run: cargo build --release --target wasm32-wasip1
 
-  # The two native helpers. Neither is a workspace member of the root crate —
-  # each has its own Cargo.lock — so every step runs in its own directory.
+  # The single native binary (intellij-native: LSP proxy + DAP adapter modes).
+  # It is not a workspace member of the root crate — it has its own Cargo.lock —
+  # so every step runs in native/.
   #
-  # No Windows runner on purpose: the bridge and the proxy's control channel
-  # speak over Unix sockets (std::os::unix::net, see proxy/src/control.rs and
-  # bridge/src/main.rs), so they do not build there yet. Adding Windows would
-  # turn this workflow permanently red until that portability work lands.
+  # No Windows runner on purpose: the control channel and the DAP mode speak over
+  # Unix sockets (std::os::unix::net, see native/src/control.rs and
+  # native/src/dap.rs), so debugging does not build there yet. Adding Windows
+  # would turn this workflow permanently red until that portability work lands.
   native:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        crate: [proxy, bridge]
     defaults:
       run:
-        working-directory: ${{ matrix.crate }}
+        working-directory: native
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -105,7 +105,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ${{ matrix.crate }} -> target
+          workspaces: native -> target
 
       - name: Format
         run: cargo fmt -- --check

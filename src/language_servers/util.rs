@@ -7,15 +7,17 @@ use zed_extension_api::{self as zed, DownloadedFileType, Result};
 /// installs live under `bin/<version>/<exec>`.
 pub(super) const NATIVE_BIN_DIR: &str = "bin";
 
-/// GitHub repository the native binaries (proxy + bridge) are downloaded from.
+/// GitHub repository the native binary is downloaded from.
 /// `.github/workflows/release.yml` attaches one `.tar.gz` per target triple to
 /// the release tagged `v<CARGO_PKG_VERSION>` — keep the tag, the asset names
 /// and this constant in lockstep when bumping the extension version.
 const RELEASES_REPO: &str = "RaedN0/zed-intellij";
 
-/// The binaries inside the release archive. `kotlin-lsp-proxy` keeps the
-/// upstream kotlin extension's binary name (see `proxy.rs`).
-const RELEASE_BINARIES: [&str; 2] = ["kotlin-lsp-proxy", "intellij-dap-bridge"];
+/// The binary inside the release archive. One executable serves both roles, in
+/// two modes (`<bin> <server> …` for the LSP pipe, `<bin> dap <worktree>` as the
+/// debug adapter) — see `native/src/main.rs`. Both roles are always *separate
+/// processes*; only the artifact is shared.
+pub(crate) const NATIVE_BINARY: &str = "intellij-native";
 
 /// The release tag corresponding to this extension package version.
 pub(super) fn extension_release_version() -> String {
@@ -23,7 +25,7 @@ pub(super) fn extension_release_version() -> String {
 }
 
 /// Find a local development override or the binary matching this extension release.
-/// Returns Ok(None) when no proxy binary is installed (callers then launch the
+/// Returns Ok(None) when no native binary is installed (callers then launch the
 /// language server directly).
 pub(super) fn find_native_binary(executable: &str) -> Result<Option<PathBuf>, String> {
     let install_dir = Path::new(NATIVE_BIN_DIR);
@@ -38,7 +40,7 @@ pub(super) fn find_native_binary(executable: &str) -> Result<Option<PathBuf>, St
         .find(|path| fs::metadata(path).is_ok_and(|metadata| metadata.is_file())))
 }
 
-/// Find a native binary, downloading the platform archive from the pinned
+/// Find the native binary, downloading the platform archive from the pinned
 /// GitHub release if the versioned install doesn't have it. Resolution order:
 ///
 /// 1. `bin/<exec>` — local development override (this repo's build output,
@@ -136,12 +138,10 @@ fn download_release_binaries() -> Result<(), String> {
         DownloadedFileType::GzipTar,
     )
     .map_err(|e| format!("failed to download {url}: {e}"))?;
-    for name in RELEASE_BINARIES {
-        let path = install_dir.join(name);
-        if path.is_file() {
-            zed::make_file_executable(&path.to_string_lossy())
-                .map_err(|e| format!("failed to make {} executable: {e}", path.display()))?;
-        }
+    let path = install_dir.join(NATIVE_BINARY);
+    if path.is_file() {
+        zed::make_file_executable(&path.to_string_lossy())
+            .map_err(|e| format!("failed to make {} executable: {e}", path.display()))?;
     }
     Ok(())
 }
@@ -162,8 +162,8 @@ fn target_triple() -> &'static str {
 
 /// Delete other downloaded versions of the given server distribution so the
 /// work directory only ever holds the version the extension pins.
-/// (Not used for proxy/bridge — those share one `bin/<version>/` dir keyed by
-/// the extension version itself.)
+/// (Not used for the native binary — it lives in the single `bin/<version>/` dir
+/// keyed by the extension version itself.)
 pub(super) fn remove_outdated_versions(
     language_server_id: &'static str,
     version_dir: &str,

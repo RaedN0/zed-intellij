@@ -1,5 +1,6 @@
-//! Side-channel that lets an out-of-band process (intellij-dap-bridge) ask the
-//! language server to start its DAP TCP endpoint.
+//! Side-channel that lets an out-of-band process (`intellij-native dap <worktree>`,
+//! the mode Zed spawns as its debug adapter) ask the language server to start its
+//! DAP TCP endpoint.
 //!
 //! intellij-server (and kotlin-lsp) embed a full DAP server: an LSP
 //! `workspace/executeCommand` with the command `start_debug_server` (see
@@ -52,7 +53,8 @@ use crate::log::{error as log_error, info as log_info};
 pub const CTRL_ID_BASE: i64 = 1 << 40;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// fnv-1a over the root URI — shared formula with intellij-dap-bridge.
+/// fnv-1a over the root URI. Both ends live in this crate: the proxy mode binds
+/// this path after `initialize`, the DAP mode connects to it.
 pub fn socket_path_for(root_uri: &str) -> PathBuf {
     env::temp_dir().join(format!("intellij-dap-{:016x}.sock", fnv64(root_uri)))
 }
@@ -93,7 +95,8 @@ impl ControlHub {
             Ok(l) => l,
             Err(e) => {
                 log_error(&format!(
-                    "control: failed to bind {}: {e} — intellij-dap-bridge will not work",
+                    "control: failed to bind {}: {e} — debugging (`intellij-native dap`) will not \
+                     work",
                     path.display()
                 ));
                 return;
@@ -218,11 +221,10 @@ impl ControlHub {
 mod tests {
     use super::*;
 
-    // intellij-dap-bridge derives the same socket path with its own copy of this
-    // hash (bridge/src/main.rs::socket_path). The two processes only meet if the
-    // two copies agree, and a drift does not fail a build — it makes every debug
-    // session wait out the bridge's connect timeout and then report a missing
-    // socket. Both crates pin the same literals so the drift fails here instead.
+    // Both ends of the control socket are in this crate (the proxy binds it, the
+    // `dap` mode connects), so these pin the wire contract itself rather than a
+    // mirror copy: a change to the name or the hash still breaks every running
+    // session, and `dap::tests` asserts the same literal.
 
     #[test]
     fn fnv64_matches_the_fnv1a_64_reference_vectors() {
@@ -233,7 +235,7 @@ mod tests {
 
     #[test]
     fn socket_name_for_a_root_uri_is_pinned() {
-        // Literal mirrored in bridge/src/main.rs's tests.
+        // Literal mirrored in dap.rs's tests.
         let name = socket_path_for("file:///repo");
         assert_eq!(
             name.file_name().unwrap().to_str().unwrap(),

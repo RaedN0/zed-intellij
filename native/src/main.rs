@@ -1,19 +1,39 @@
-//! kotlin-lsp-proxy — a thin stdio proxy in front of JetBrains `kotlin-lsp`.
+//! intellij-native — the extension's single native helper. Two modes, one
+//! executable:
 //!
-//! kotlin-lsp returns navigation targets that live inside source archives
+//! ```text
+//! intellij-native <server-bin> [args...]   # LSP proxy mode (stdin/stdout pipe)
+//! intellij-native dap <worktree>           # DAP bridge mode (Zed's debug adapter)
+//! ```
+//!
+//! They are the same file but never the same process: [`dap`] is spawned by Zed
+//! with the worktree as cwd and asks the *proxy* process (which owns the live
+//! LSP connection) over a Unix control socket to start the server-side debug
+//! endpoint — see [`control`].
+//!
+//! The modes must not share a log sink: proxy mode owns stdout as an LSP pipe
+//! (`lsp_info!` emits `window/logMessage` frames), while DAP mode owns stdout as
+//! a DAP pipe, so [`dap`] logs to stderr and a file instead.
+//!
+//! ## Proxy mode
+//!
+//! intellij-server returns navigation targets that live inside source archives
 //! (`…/foo-sources.jar!/pkg/Foo.kt`, `…/lib/src.zip!/…/Instant.java`). Zed cannot open
 //! those archive-internal paths, so "Go to Definition" into any library/JDK class shows
 //! an empty buffer (zed-extensions/kotlin#106).
 //!
-//! This proxy sits between Zed and kotlin-lsp, forwards every message untouched, and only
-//! rewrites the location URIs in definition-family responses: it extracts the referenced
-//! entry from the jar/zip to a real temp file and points Zed at that instead.
-//!
-//! Usage: `kotlin-lsp-proxy <kotlin-lsp-binary> [args...]`
+//! This proxy sits between Zed and intellij-server, forwards every message untouched, and
+//! only rewrites the location URIs in definition-family responses: it extracts the
+//! referenced entry from the jar/zip to a real temp file and points Zed at that instead.
+//! It also repairs outgoing `textDocument/codeAction` requests (see [`diagnostics`]).
 
 #[macro_use]
 mod log;
 mod control;
+/// Debug adapter mode. Unix-socket only (see the module docs), so Windows builds
+/// keep the proxy mode and answer `dap` with an explicit error.
+#[cfg(unix)]
+mod dap;
 mod diagnostics;
 mod lsp;
 mod platform;
@@ -41,15 +61,37 @@ use std::{
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+    // `dap` is the only reserved first argument, and the placeholder captures
+    // it so `run_proxy` sees exactly what it saw before the merge. Every other
+    // invocation is proxy mode, which keeps `intellij-native <server> …`
+    // compatible with the old `kotlin-lsp-proxy <server> …`.
+    match args.first().map(String::as_str) {
+        #[cfg(unix)]
+        Some("dap") => dap::run(args.get(1).map(String::as_str)),
+        #[cfg(not(unix))]
+        Some("dap") => {
+            eprintln!(
+                "intellij-native: debug adapter mode is not supported on Windows (the control \
+                 channel and the DAP bridge speak over Unix sockets)"
+            );
+            process::exit(1);
+        }
+        _ => run_proxy(&args),
+    }
+}
+
+/// LSP proxy mode: `intellij-native <server-bin> [args...]`.
+fn run_proxy(args: &[String]) {
     if args.is_empty() {
-        eprintln!("Usage: kotlin-lsp-proxy <bin> [args...]");
+        eprintln!("Usage: intellij-native <bin> [args...]");
+        eprintln!("       intellij-native dap <worktree>");
         process::exit(1);
     }
 
     let bin = &args[0];
     let child_args = &args[1..];
 
-    lsp_info!("kotlin-lsp-proxy starting: bin={bin}");
+    lsp_info!("intellij-native (proxy) starting: bin={bin}");
 
     let mut child = Command::new(bin)
         .args(child_args)
@@ -175,7 +217,7 @@ fn main() {
         alive_in.store(false, Ordering::Relaxed);
     });
 
-    // --- Thread 2: kotlin-lsp stdout -> rewrite archive URIs -> Zed stdout ---
+    // --- Thread 2: server stdout -> rewrite archive URIs -> Zed stdout ---
     let alive_out = Arc::clone(&alive);
     let tracked_out = Arc::clone(&tracked);
     let hub_slot_out = Arc::clone(&hub_slot);
@@ -267,7 +309,7 @@ fn main() {
     spawn_parent_monitor(Arc::clone(&alive), child.id());
 
     let status = child.wait();
-    lsp_info!("kotlin-lsp process exited: {status:?}");
+    lsp_info!("intellij-server exited: {status:?}");
     alive.store(false, Ordering::Relaxed);
 }
 

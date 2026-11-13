@@ -1,0 +1,47 @@
+# Standalone crate (its own workspace) so it doesn't get pulled into the
+# extension's wasm build.
+#
+# One binary, two modes (see src/main.rs):
+#   intellij-native <server-bin> [args...]   stdio LSP proxy in front of
+#                                            intellij-server (archive source
+#                                            URIs + code-action repair),
+#   intellij-native dap <worktree>           the debug adapter Zed spawns.
+# Both modes are the same executable but always separate processes: the proxy
+# owns the live LSP connection, and the debug adapter is spawned by Zed with the
+# worktree as cwd and reaches the server through the proxy's control socket.
+[workspace]
+
+[package]
+name = "intellij-native"
+version = "0.4.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Native helper for the Zed IntelliJ extension: LSP proxy in front of intellij-server plus the DAP bridge Zed spawns as its debug adapter."
+
+[[bin]]
+name = "intellij-native"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Threading",
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
+
+[profile.release]
+strip = true
+# The proxy mode sits on the completion/definition latency path; size is
+# irrelevant (one ~700 KB machine-local asset, not redistributed), so optimize
+# for speed rather than size.
+opt-level = 3
+lto = true

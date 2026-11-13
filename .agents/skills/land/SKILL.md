@@ -30,9 +30,10 @@ metadata:
   configured with `receive.denyCurrentBranch=updateInstead`
   (`git config remote.local.url` / `remote.local.receivepack`). Pushing to that
   remote updates the checkout's working tree directly.
-- `bin/` is gitignored (root `.gitignore`); the seeded `kotlin-lsp-proxy` and
-  `intellij-dap-bridge` binaries are rebuilt and copied into the Zed extension
-  work directory by hand and are never part of a landed change.
+- `bin/` is gitignored (root `.gitignore`); the seeded `intellij-native` binary
+  (both the LSP proxy and the `dap` mode live in that one executable) is rebuilt
+  and copied into the Zed extension work directory by hand and is never part of
+  a landed change.
 
 ## Workflow
 
@@ -43,8 +44,8 @@ metadata:
    unclear, stop and ask.
 2. **Verify the change before landing it** (this repo has no CI, so these local
    builds are the only gate, and they must pass on the exact change being landed):
-   - Proxy crate: `cargo build --release` run inside `proxy/`
-     (its `[profile.release]` lives in `proxy/Cargo.toml`).
+   - Native crate: `cargo build --release` run inside `native/`
+     (its `[profile.release]` lives in `native/Cargo.toml`).
    - Extension: `cargo check --target wasm32-wasip1` run at the repository root
      (root `Cargo.toml` is a `cdylib` built against `zed_extension_api`, and
      `extension.toml` declares this as a Zed extension).

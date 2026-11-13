@@ -1,12 +1,12 @@
-# Builds the native binaries (kotlin-lsp-proxy from proxy/ and
-# intellij-dap-bridge from bridge/) for every supported target and attaches one
-# flat tar.gz per platform to the GitHub release matching the pushed tag.
+# Builds the native binary (intellij-native from native/, which serves both the
+# LSP proxy and the DAP adapter mode) for every supported target and attaches
+# one flat tar.gz per platform to the GitHub release matching the pushed tag.
 #
 # The extension pins exactly this tag — `v<CARGO_PKG_VERSION>` from Cargo.toml
 # (src/language_servers/util.rs) — so bump the version and push a matching tag
-# whenever the binaries change. Asset naming contract:
+# whenever the binary changes. Asset naming contract:
 #   zed-intellij-v<version>-<target-triple>.tar.gz
-# containing kotlin-lsp-proxy and intellij-dap-bridge at the archive root.
+# containing the single executable intellij-native at the archive root.
 name: Release
 
 on:
@@ -72,24 +72,19 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Build proxy
-        working-directory: proxy
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Build bridge
-        working-directory: bridge
+      - name: Build native
+        working-directory: native
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package
         run: |
           target="${{ matrix.target }}"
           staging="$(mktemp -d)"
-          cp "proxy/target/${target}/release/kotlin-lsp-proxy" "$staging/"
-          cp "bridge/target/${target}/release/intellij-dap-bridge" "$staging/"
+          cp "native/target/${target}/release/intellij-native" "$staging/"
           chmod +x "$staging"/*
           # Flat archive: the extension extracts it directly into bin/<version>/
           tar -czf "zed-intellij-${GITHUB_REF_NAME}-${target}.tar.gz" \
-            -C "$staging" kotlin-lsp-proxy intellij-dap-bridge
+            -C "$staging" intellij-native
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2

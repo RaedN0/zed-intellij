@@ -1,16 +1,19 @@
-//! DAP bridge between Zed's debugger and intellij-server's embedded DAP endpoint.
+//! DAP bridge between Zed's debugger and intellij-server's embedded DAP endpoint
+//! — mode `intellij-native dap <worktree>`.
 //!
 //! Zed spawns this process as its "debug adapter" and speaks DAP over stdio. The
 //! real adapter runs *inside* the JetBrains language server: an LSP
 //! `workspace/executeCommand` with command `start_debug_server` makes the server
 //! bind a DAP-speaking TCP endpoint on 127.0.0.1 and answer with the port. That
-//! request must travel on the live LSP connection, which is owned by
-//! kotlin-lsp-proxy — so the proxy exposes a Unix control socket
-//! (`$TMPDIR/intellij-dap-<fnv64(root_uri)>.sock`, see proxy/src/control.rs).
+//! request must travel on the live LSP connection, which is owned by the proxy
+//! mode of this same executable — so the proxy exposes a Unix control socket
+//! (`$TMPDIR/intellij-dap-<fnv64(root_uri)>.sock`, see [`crate::control`]).
 //!
 //! This bridge:
-//!   1. derives the socket path from the worktree path given as argv[1] —
-//!      uri `file://<abs path>`, hashed with the same fnv-1a as the proxy,
+//!   1. derives the socket path from the worktree path given as argv[2] —
+//!      uri `file://<abs path>`, hashed with the same fnv-1a as the proxy
+//!      ([`crate::control::socket_path_for`], which is now literally the same
+//!      function instead of a mirror copy),
 //!   2. sends `START`, reads `PORT <n>` (or `ERR …`),
 //!   3. rewrites the first DAP `initialize` request's adapterID to
 //!      `intellij_jvm` — the id intellij-server's debugger lookup expects —
@@ -18,6 +21,10 @@
 //!
 //! All heavy lifting (breakpoints incl. Kotlin sources, variables, evaluation)
 //! happens in the IntelliJ engine behind the TCP endpoint.
+//!
+//! Nothing here may write to stdout except DAP frames: stdout is the pipe Zed
+//! parses, which is why this mode logs to stderr plus a file instead of using
+//! [`crate::log`] (that one emits `window/logMessage` LSP frames).
 
 use serde_json::{json, Value};
 use std::{
@@ -25,7 +32,7 @@ use std::{
     io::{Read, Write},
     net::TcpStream,
     os::unix::net::UnixStream,
-    path::{Path, PathBuf},
+    path::Path,
     process, thread,
     time::{Duration, Instant},
 };
@@ -35,39 +42,21 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// same string as the debug configuration type.
 const ADAPTER_ID: &str = "intellij_jvm";
 
-/// Same fnv-1a as proxy/src/control.rs.
-fn fnv64(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
-/// Control-socket path for a worktree root URI.
-///
-/// kotlin-lsp-proxy computes the other end with proxy/src/control.rs's
-/// `socket_path_for`, and the two processes only ever meet here. A drift is
-/// invisible at build time: the bridge just retries for CONNECT_TIMEOUT and
-/// then reports "no proxy control socket". Both crates pin the same literal in
-/// their tests so a change to either copy fails immediately.
-fn socket_path(root_uri: &str) -> PathBuf {
-    env::temp_dir().join(format!("intellij-dap-{:016x}.sock", fnv64(root_uri)))
+/// Where [`trace`] appends. Zed swallows a debug adapter's stderr into its log
+/// panel, so a file is the only trail that survives a failed session — and it
+/// has to be a path the user can be pointed at, hence temp_dir over a literal
+/// `/tmp` (no such directory on Windows).
+fn trace_path() -> std::path::PathBuf {
+    env::temp_dir().join("intellij-dap-bridge.log")
 }
 
 fn trace(msg: &str) {
-    // stderr is swallowed when Zed spawns us; keep an append-only trail in /tmp
     use std::fs::OpenOptions;
-    use std::io::Write;
-    if let Ok(mut f) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/intellij-dap-bridge.log")
-    {
+    let path = trace_path();
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = f.write_all(format!("{msg}\n").as_bytes());
     }
-    eprintln!("intellij-dap-bridge: {msg}");
+    eprintln!("intellij-native dap: {msg} (trace: {})", path.display());
 }
 
 fn die(msg: &str) -> ! {
@@ -75,14 +64,15 @@ fn die(msg: &str) -> ! {
     process::exit(1);
 }
 
-fn main() {
-    // argv[1] = worktree absolute path (from zed-intellij's debug_adapter_binary_for)
-    let worktree = env::args()
-        .nth(1)
-        .unwrap_or_else(|| die("missing worktree path argument"));
+/// Entry point for `intellij-native dap <worktree>`.
+pub fn run(worktree: Option<&str>) {
+    // The extension passes the worktree absolute path (see Zed's get_dap_binary).
+    let worktree = worktree.unwrap_or_else(|| {
+        die("missing worktree path argument (usage: intellij-native dap <worktree>)")
+    });
     trace(&format!("start: worktree={worktree}"));
-    let root_uri = format!("file://{}", Path::new(&worktree).display());
-    let sock_path = socket_path(&root_uri);
+    let root_uri = format!("file://{}", Path::new(worktree).display());
+    let sock_path = crate::control::socket_path_for(&root_uri);
 
     // 1. control socket (the proxy creates it once its LSP session is initialized)
     let mut control = connect_with_retry(&sock_path);
@@ -403,30 +393,34 @@ mod tests {
         body
     }
 
-    // --- fnv64 and the socket path: the proxy owns the other end ---
+    // --- the control socket is shared with the proxy mode ---
 
     #[test]
-    fn fnv64_matches_the_fnv1a_64_reference_vectors() {
-        // Published FNV-1a vectors. The point is that proxy/src/control.rs
-        // derives the same hash from the same string: both sides index the
-        // control socket by it, and nothing else ties them together.
-        assert_eq!(fnv64(""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(fnv64("a"), 0xaf63_dc4c_8601_ec8c);
-        assert_eq!(fnv64("foobar"), 0x8594_4171_f739_67e8);
-    }
-
-    #[test]
-    fn socket_name_for_a_root_uri_is_pinned() {
-        // Literal mirrored in proxy/src/control.rs. Drift here is a debugging
-        // session that hangs for CONNECT_TIMEOUT and then reports a missing
-        // socket, so it is worth failing a test instead.
+    fn derives_the_same_socket_path_as_the_proxy_side() {
+        // `run` connects to whatever the proxy mode bound; both call
+        // control::socket_path_for, so this pins the name both ends use.
+        let root_uri = "file:///repo";
         assert_eq!(
-            socket_path("file:///repo")
+            crate::control::socket_path_for(root_uri)
                 .file_name()
                 .unwrap()
                 .to_str()
                 .unwrap(),
             "intellij-dap-df01bf954840a316.sock"
+        );
+    }
+
+    // --- trace location ---
+
+    #[test]
+    fn the_trace_file_is_under_temp_dir_not_a_hardcoded_tmp() {
+        // `/tmp` does not exist everywhere; the log has to be somewhere `die()`
+        // can name and the user can open.
+        let path = trace_path();
+        assert_eq!(path.parent().unwrap(), env::temp_dir());
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            "intellij-dap-bridge.log"
         );
     }
 

@@ -147,8 +147,9 @@ fn workspace_init_options(
 /// `:`, so a worktree with a space or `#` in it produces the same URI Zed sent.
 /// That matters because the server compares this string against its own folder
 /// URI: `file:///a b` would never match `file:///a%20b`, and `buildTools` would
-/// be silently ignored. (The DAP bridge derives its own URI without encoding —
-/// it only feeds a local socket key, never a server-side comparison.)
+/// be silently ignored. (The DAP mode of the native binary derives its own URI
+/// without encoding — it only feeds a local socket key, never a server-side
+/// comparison.)
 fn path_to_file_uri(path: &str) -> String {
     let normalised = path.replace('\\', "/");
     let normalised = normalised
@@ -256,7 +257,7 @@ impl zed::Extension for IntelliJServerExtension {
                     ),
                 ];
 
-                // Run intellij-server behind kotlin-lsp-proxy, which rewrites
+                // Run intellij-server behind the native proxy, which rewrites
                 // archive-internal (`jar!/`) source URIs into real files so
                 // Go-to-Definition into library sources works (see
                 // zed-extensions/kotlin#106). If the proxy isn't available,
@@ -289,7 +290,7 @@ impl zed::Extension for IntelliJServerExtension {
                     }
                     Ok(None) => {
                         eprintln!(
-                            "kotlin-lsp-proxy not found in bin/; launching intellij-server directly"
+                            "intellij-native not found in bin/; launching intellij-server directly"
                         );
                         Ok(zed::Command {
                             command: binary_path,
@@ -351,10 +352,11 @@ impl zed::Extension for IntelliJServerExtension {
     }
 
     // --- Debug adapter: IntelliJ's engine, streamed live over the LSP session ---
-    // Zed spawns `bin/intellij-dap-bridge` as the "adapter"; that process asks
-    // kotlin-lsp-proxy (which owns the live LSP connection) to run the server-side
-    // `start_debug_server` LSP command, and then pumps DAP between Zed's stdio and
-    // the TCP endpoint the server opened. All resolution (mainClass → classpath,
+    // Zed spawns the native binary in `dap` mode as the "adapter"; that process
+    // asks the proxy-mode process (which owns the live LSP connection) to run the
+    // server-side `start_debug_server` LSP command, and then pumps DAP between
+    // Zed's stdio and the TCP endpoint the server opened. All resolution
+    // (mainClass → classpath,
     // java binary, module paths) happens inside intellij-server against ITS
     // imported project model — which is what makes Kotlin + Java breakpoints, and
     // mixed-source stepping "just work".
@@ -411,7 +413,7 @@ impl zed::Extension for IntelliJServerExtension {
             zed::StartDebuggingRequestArgumentsRequest::Launch
         };
 
-        // The bridge ships in the same release archive as the proxy (see
+        // The same executable the language server pipe runs (see
         // `util::ensure_native_binary`): bin/ holds a local dev override or the
         // extracted release download. A dev reinstall wipes bin/, but the
         // extension re-downloads from the pinned GitHub release on demand — no
@@ -419,27 +421,30 @@ impl zed::Extension for IntelliJServerExtension {
         // Must be absolute: Zed spawns a debug adapter with the worktree as cwd
         // and does not resolve relative paths against the extension work dir the
         // way it does for language servers (see `util::ensure_absolute_native_binary`).
-        let bridge = match user_installed_path {
+        let native = match user_installed_path {
             Some(path) => std::path::PathBuf::from(path),
-            None => {
-                util::ensure_absolute_native_binary("intellij-dap-bridge")?.ok_or_else(|| {
-                    "intellij-dap-bridge missing after release download; rebuild bridge/ in the \
-                 zed-intellij repo and attach a fixed archive to the release, then retry"
-                        .to_string()
-                })?
-            }
+            None => util::ensure_absolute_native_binary(util::NATIVE_BINARY)?.ok_or_else(|| {
+                format!(
+                    "{} missing after release download; build native/ in the zed-intellij \
+                         repo and attach a fixed archive to the release, then retry",
+                    util::NATIVE_BINARY
+                )
+            })?,
         };
         // `user_installed_path` is not validated by Zed — make sure it exists.
-        if !bridge.is_file() {
+        if !native.is_file() {
             return Err(format!(
-                "intellij-dap-bridge not found at {} (settings override); fix the path and retry",
-                bridge.display()
+                "{} not found at {} (settings override); fix the path and retry",
+                util::NATIVE_BINARY,
+                native.display()
             ));
         }
 
         Ok(zed::DebugAdapterBinary {
-            command: Some(bridge.to_string_lossy().into_owned()),
-            arguments: vec![worktree.root_path().to_string()],
+            command: Some(native.to_string_lossy().into_owned()),
+            // `dap` selects the debug-adapter mode; without it the binary would
+            // treat the worktree path as a server binary and proxy it.
+            arguments: vec!["dap".to_string(), worktree.root_path().to_string()],
             envs: vec![],
             cwd: None,
             connection: None,

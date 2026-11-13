@@ -7,7 +7,8 @@ embeds behind its `start_debug_server` LSP command.
 
 One language server (`intellij-server`) serves both languages from the same
 engine and project model. The debug adapter (`intellij_jvm`) is a small bridge
-process that pumps DAP between Zed and the TCP endpoint the server opens, so
+mode of the bundled native helper that pumps DAP between Zed and the TCP
+endpoint the server opens, so
 Kotlin + Java breakpoints and mixed-source stepping work against IntelliJ's own
 project model (mainClass → classpath resolution happens inside the server).
 
@@ -43,28 +44,33 @@ Acceptance is recorded with the launcher by passing
 build you actually have, so it tracks version bumps instead of being pinned.
 Only a literal JSON `true` enables the download — a string `"true"` does not.
 
-### Native binaries
+### The native binary
 
-Two native helpers are needed; the extension resolves them in this order (see
-`src/language_servers/util.rs`):
+One native executable is needed — `intellij-native` (from `native/`). The
+extension resolves it in this order (see `src/language_servers/util.rs`):
 
-1. `bin/<exec>` — local dev override (e.g. your own build of `proxy/` /
-   `bridge/`),
-2. `bin/<version>/<exec>` — extracted from the release archive,
+1. `bin/intellij-native` — local dev override (e.g. your own build of
+   `native/`),
+2. `bin/<version>/intellij-native` — extracted from the release archive,
 3. **on demand**: `zed-intellij-v<version>-<target-triple>.tar.gz` downloaded
    from the GitHub release tagged `v<version>` (built by
    `.github/workflows/release.yml`) and extracted into `bin/<version>/`.
 
-- `kotlin-lsp-proxy` (from `proxy/`) sits on the LSP pipe and does two things:
+It has two modes, and they are always **two separate processes** (the debug
+adapter has to ask the process that owns the live LSP connection to start the
+server-side debug endpoint):
+
+- `intellij-native <server-bin> [args…]` — the LSP proxy on the pipe, doing two
+  things:
   1. rewrites the archive-internal (`jar!/`, `zip!/`) source URIs the server
      returns into real files so Go-to-Definition into library/JDK sources works;
   2. repairs outgoing `textDocument/codeAction` requests (see below), without
      which the server's "Import class …" / "Create class …" quickfixes can go
      missing.
-  Optional — without the proxy the server still runs, but those quickfixes stay
+  Optional — without it the server still runs, but those quickfixes stay
   missing in that case.
-- `intellij-dap-bridge` (from `bridge/`) is the debug adapter. Required for
-  debugging (Unix sockets; no Windows).
+- `intellij-native dap <worktree>` — the debug adapter. Required for debugging
+  (Unix sockets; no Windows).
 
 #### Why the proxy repairs code-action requests
 
@@ -104,21 +110,22 @@ outgoing code-action requests in two additive steps:
 Neither step removes or overwrites what the client sent, and both are no-ops when
 the request is already correct — such requests are forwarded byte-for-byte.
 
-#### Shipping proxy/bridge changes
+#### Shipping native changes
 
 Nothing to reseed by hand: a dev-extension reinstall wipes `bin/`, and the
 extension then re-downloads `zed-intellij-v<version>-<target-triple>.tar.gz` from
-the GitHub release tagged `v<version>`. So a change to `proxy/` or `bridge/`
-reaches Zed only once that release exists:
+the GitHub release tagged `v<version>`. So a change to `native/` reaches Zed only
+once that release exists:
 
 ```sh
 # bump Cargo.toml + extension.toml to the same version, then
 commit … && git push origin main
-git tag v0.2.0 && git push origin v0.2.0   # CI attaches the archives
+git tag v0.4.0 && git push origin v0.4.0   # CI attaches the archives
 ```
 
-A local `bin/<exec>` still wins over the downloaded copy (dev override), so a
-local `cargo build --release` in `proxy/` can be tried before tagging. The
+A local `bin/intellij-native` still wins over the downloaded copy (dev
+override), so a local `cargo build --release` in `native/` can be tried before
+tagging. The
 caveat: the pinned tag is `v<CARGO_PKG_VERSION>`, so until a release is tagged
 for the current version, a reinstall silently falls back to the *previous*
 release's binaries.
@@ -143,7 +150,8 @@ release's binaries.
   `src/language_servers/intellij_server.rs` is only a fallback for the window
   before a distribution has been extracted.
 - `lsp.intellij-server.settings.vm_options` tunes server JVM flags;
-  `lsp.intellij-server.settings.proxy_path` overrides the proxy binary.
+  `lsp.intellij-server.settings.proxy_path` points at a different build of the
+  native binary for the proxy role (an escape hatch, not needed normally).
 - Telemetry is off unconditionally (`INTELLIJ_DATA_SHARING=none`). Unlike the
   JetBrains client there is no opt-in setting: accepting the EULA is one axis,
   sending usage data is another, and this extension only ever does the first.
@@ -189,7 +197,7 @@ imported.
 
 ### Debug the file you are looking at, in any project
 
-`mainClass` may be omitted when `file` is given: the bridge derives the entry
+`mainClass` may be omitted when `file` is given: the adapter derives the entry
 point from that source file. That makes a single *global* configuration work
 in every project — put this in `~/.config/zed/debug.json` (command palette:
 `zed: open debug tasks`) once:
@@ -265,7 +273,8 @@ at runtime and never redistributes it.
 
 Derived in part from [zed-extensions/kotlin](https://github.com/zed-extensions/kotlin)
 (MIT, © 2024 Evren Sen) — the extension scaffolding and the
-`kotlin-lsp-proxy` source-uri rewriting approach (kotlin#106).
+source-uri rewriting approach for archive-internal (`jar!/`) paths (kotlin#106),
+which `intellij-native` implements.
 
 ## License
 
