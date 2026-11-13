@@ -14,11 +14,11 @@
         },
         "mainClass": {
           "type": "string",
-          "description": "Fully-qualified name of the class with the main method. intellij-server resolves classpath, module path, working directory and the java executable from its imported project model."
+          "description": "Fully-qualified name of the class with the main method. May be omitted when `file` is given: the bridge derives the entry point from that file, so one configuration with \"file\": \"$ZED_FILE\" works in every project. intellij-server resolves classpath, module path, working directory and the java executable from its imported project model."
         },
         "file": {
           "type": "string",
-          "description": "Path to the source file declaring the main class; disambiguates multiple classes with the same fully-qualified name."
+          "description": "Path to the source file declaring the main class (\"$ZED_FILE\"). Used to derive `mainClass` when it is omitted, and to disambiguate multiple classes with the same fully-qualified name."
         },
         "args": {
           "type": "array",
@@ -71,7 +71,10 @@
           "description": "true = run without the debugger attached (i.e. RUN)."
         }
       },
-      "required": ["mainClass"]
+      "anyOf": [
+        { "required": ["mainClass"] },
+        { "required": ["file"] }
+      ]
     },
     {
       "title": "Attach",

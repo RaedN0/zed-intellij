@@ -185,7 +185,20 @@ fn connect_with_retry(sock_path: &Path) -> UnixStream {
     }
 }
 
-/// Structured result of resolving a launch via the proxy.
+/// Upgrades a `launch` request in place, in two independent steps:
+///
+///   1. **Entry point from the open file.** A configuration of
+///      `{"request":"launch","file":"$ZED_FILE"}` names no class, so the
+///      fully-qualified name of the `main` declaration is derived from that
+///      file here. That is what makes a single entry in the *global*
+///      debug.json debug whatever file is open, in any project — intellij-server
+///      resolves the classpath, module and JDK from its project model, but not
+///      the entry point itself.
+///   2. **Classpath resolution via the proxy**, when a main class is known and
+///      `javaExec` is not — the proxy owns the live LSP session, so the server
+///      can resolve against the project it actually imported.
+///
+/// `None` means "nothing to rewrite", so the caller forwards the frame verbatim.
 fn intercept_launch(frame: &[u8], sock_path: &Path) -> Option<Vec<u8>> {
     let header_end = frame
         .windows(4)
@@ -198,20 +211,71 @@ fn intercept_launch(frame: &[u8], sock_path: &Path) -> Option<Vec<u8>> {
     if value.get("command").and_then(|v| v.as_str()) != Some("launch") {
         return None;
     }
-    let args = value.get("arguments").cloned().unwrap_or(Value::Null);
-    let has_main = args.get("mainClass").and_then(|v| v.as_str()).is_some();
+
+    let mut args = value.get("arguments").cloned().unwrap_or(Value::Null);
+    let mut rewritten = false;
+
+    // 1. Derive the entry point when the configuration only names a file.
+    let main_class = args
+        .get("mainClass")
+        .and_then(|v| v.as_str())
+        .filter(|class| !class.is_empty());
+    if main_class.is_none() {
+        if let Some(class) = args
+            .get("file")
+            .and_then(|v| v.as_str())
+            .filter(|file| !file.is_empty())
+            .and_then(|file| main_class_for_file(Path::new(file)))
+        {
+            trace(&format!("launch: inferred mainClass {class}"));
+            args["mainClass"] = json!(class);
+            rewritten = true;
+        }
+    }
+
+    let has_main = args
+        .get("mainClass")
+        .and_then(|v| v.as_str())
+        .is_some_and(|class| !class.is_empty());
     let has_exec = args
         .get("javaExec")
         .and_then(|v| v.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    if !has_main || has_exec {
-        return None; // attach, pre-resolved, or not a JVM launch: pass through
+        .is_some_and(|exec| !exec.is_empty());
+
+    // 2. Resolve classpath/module/JDK against the live project model.
+    if has_main && !has_exec {
+        if let Some(merged) = resolve_via_proxy(&args, sock_path) {
+            trace("launch resolved, forwarding");
+            args = merged;
+            rewritten = true;
+        }
     }
 
+    if !rewritten {
+        return None; // attach, already resolved, or nothing we can improve
+    }
+    value["arguments"] = args;
+    let body = serde_json::to_vec(&value).ok()?;
+    Some(reframe(&body))
+}
+
+/// A `Content-Length`-framed DAP message around `body`.
+fn reframe(body: &[u8]) -> Vec<u8> {
+    let mut out = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+    out.extend_from_slice(body);
+    out
+}
+
+/// Asks the proxy (which owns the live LSP session) to resolve a launch against
+/// intellij-server's project model.
+///
+/// `None` for every failure mode — no socket, `ERR` reply, unparseable answer —
+/// because an unresolved launch is still worth forwarding: the server does what
+/// it can, and a debug session is better than a dropped request.
+fn resolve_via_proxy(args: &Value, sock_path: &Path) -> Option<Value> {
     trace("launch: resolving via project model");
     let mut control = UnixStream::connect(sock_path).ok()?;
-    let body = serde_json::to_vec(&args).ok()?;
+    let body = serde_json::to_vec(args).ok()?;
     control
         .write_all(b"RESOLVE ")
         .and_then(|_| control.write_all(&body))
@@ -228,16 +292,67 @@ fn intercept_launch(frame: &[u8], sock_path: &Path) -> Option<Vec<u8>> {
         trace(&format!("resolve FAILED: {err} (forwarding unresolved)"));
         return None;
     }
-    let merged = reply.strip_prefix("OK ")?;
-    let Ok(merged) = serde_json::from_str::<Value>(merged) else {
-        return None;
-    };
-    value["arguments"] = merged;
-    trace("launch resolved, forwarding");
-    let new_body = serde_json::to_vec(&value).ok()?;
-    let mut out = format!("Content-Length: {}\r\n\r\n", new_body.len()).into_bytes();
-    out.extend_from_slice(&new_body);
-    Some(out)
+    serde_json::from_str::<Value>(reply.strip_prefix("OK ")?).ok()
+}
+
+/// Fully-qualified name of the `main` entry point declared in `path`.
+fn main_class_for_file(path: &Path) -> Option<String> {
+    let source = std::fs::read_to_string(path).ok()?;
+    let stem = path.file_stem()?.to_string_lossy().into_owned();
+    let is_kotlin = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("kt"));
+    main_class_in_source(&source, &stem, is_kotlin)
+}
+
+/// Entry point of `source`, qualified by its package.
+///
+/// Deliberately textual rather than a real parse: the only inputs are a
+/// `package` line and the declaration enclosing `main`, and a wrong guess fails
+/// loudly ("class not found") instead of silently debugging the wrong target.
+fn main_class_in_source(source: &str, file_stem: &str, is_kotlin: bool) -> Option<String> {
+    let package = source
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("package "))
+        .and_then(|rest| rest.split(';').next())
+        .map(str::trim)
+        .filter(|package| !package.is_empty());
+
+    let class = enclosing_class(source, file_stem, is_kotlin)?;
+    Some(match package {
+        Some(package) => format!("{package}.{class}"),
+        None => class,
+    })
+}
+
+/// The class-like declaration that encloses `main`, or the synthetic name a
+/// top-level Kotlin `fun main` compiles to (`<File>Kt`).
+fn enclosing_class(source: &str, file_stem: &str, is_kotlin: bool) -> Option<String> {
+    let main_at = ["static void main", "fun main", "void main"]
+        .iter()
+        .filter_map(|signature| source.find(signature))
+        .min()?;
+    let before = &source[..main_at];
+
+    let nearest = ["class ", "object ", "record "]
+        .iter()
+        .filter_map(|keyword| before.rfind(keyword).map(|at| (at, *keyword)))
+        .max_by_key(|(at, _)| *at);
+    if let Some((at, keyword)) = nearest {
+        let name: String = before[at + keyword.len()..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+
+    Some(if is_kotlin {
+        format!("{file_stem}Kt")
+    } else {
+        file_stem.to_string()
+    })
 }
 
 /// Read one complete framed DAP message (headers + body) from a reader.
@@ -542,6 +657,84 @@ mod tests {
             Path::new("/nonexistent/intellij-dap.sock")
         )
         .is_none());
+    }
+
+    // --- entry point inference ---
+
+    #[test]
+    fn infers_the_entry_point_from_the_source_file() {
+        // Java: package + the declaration enclosing main.
+        let java = "package com.example.app;\n\npublic class App {\n  public static void main(String[] a) {}\n}\n";
+        assert_eq!(
+            main_class_in_source(java, "App", false).as_deref(),
+            Some("com.example.app.App")
+        );
+
+        // Default package.
+        let default_pkg = "public class App {\n  public static void main(String[] a) {}\n}\n";
+        assert_eq!(
+            main_class_in_source(default_pkg, "App", false).as_deref(),
+            Some("App")
+        );
+
+        // Kotlin: main inside an object keeps the object's name.
+        let kotlin_object =
+            "package com.example\n\nobject App {\n    fun main(args: Array<String>) {}\n}\n";
+        assert_eq!(
+            main_class_in_source(kotlin_object, "App", true).as_deref(),
+            Some("com.example.App")
+        );
+
+        // Kotlin: top-level main compiles to <File>Kt.
+        let kotlin_top_level = "package com.example\n\nfun main() {\n}\n";
+        assert_eq!(
+            main_class_in_source(kotlin_top_level, "Main", true).as_deref(),
+            Some("com.example.MainKt")
+        );
+    }
+
+    #[test]
+    fn a_file_without_main_has_no_entry_point() {
+        // Must not guess: debugging a library class silently would be worse
+        // than letting the server report "no main found".
+        let lib = "package com.example;\n\npublic class Util {\n}\n";
+        assert_eq!(main_class_in_source(lib, "Util", false), None);
+    }
+
+    #[test]
+    fn derives_the_entry_point_from_the_open_file() {
+        let dir = env::temp_dir().join(format!("zidt-src-{}", process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("App.java");
+        std::fs::write(
+            &file,
+            "package com.example;\npublic class App {\n  public static void main(String[] a) {}\n}\n",
+        )
+        .unwrap();
+
+        let launch = frame(&format!(
+            r#"{{"seq":9,"command":"launch","arguments":{{"request":"launch","file":"{}"}}}}"#,
+            file.display()
+        ));
+        // No proxy socket: classpath resolution fails, but the inferred entry
+        // point must still be forwarded rather than dropped.
+        let out = intercept_launch(&launch, Path::new("/nonexistent/x.sock"))
+            .expect("frame is rewritten with the inferred entry point");
+        let value: Value = serde_json::from_slice(body_of(&out)).unwrap();
+        assert_eq!(value["arguments"]["mainClass"], json!("com.example.App"));
+        assert_eq!(value["arguments"]["request"], json!("launch"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_explicit_main_class_is_never_overridden() {
+        let launch = frame(
+            r#"{"seq":10,"command":"launch","arguments":{"mainClass":"a.B","file":"/does/not/exist.java"}}"#,
+        );
+        // Class name present and javaExec absent: only the proxy step would
+        // apply, and it is unreachable, so the frame stays untouched.
+        assert!(intercept_launch(&launch, Path::new("/nonexistent/x.sock")).is_none());
     }
 
     #[test]

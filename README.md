@@ -180,6 +180,79 @@ options JetBrains' own VS Code client sends:
   accepted as an alias. Only needed when detection picks the wrong tool or finds
   none.
 
+## Debugging
+
+The adapter id is `intellij_jvm`. Everything below is plain Zed debug
+configuration — the IntelliJ debug engine runs behind it, with classpath,
+module path, working directory and the JDK resolved from the project the server
+imported.
+
+### Debug the file you are looking at, in any project
+
+`mainClass` may be omitted when `file` is given: the bridge derives the entry
+point from that source file. That makes a single *global* configuration work
+in every project — put this in `~/.config/zed/debug.json` (command palette:
+`zed: open debug tasks`) once:
+
+```json
+[
+  {
+    "label": "Debug with IntelliJ server",
+    "adapter": "intellij_jvm",
+    "request": "launch",
+    "file": "$ZED_FILE",
+    "cwd": "$ZED_WORKTREE_ROOT"
+  }
+]
+```
+
+Then `F4` → **Debug** → *Debug with IntelliJ server* debugs whichever file is
+open. The class name comes from the `package` line plus the declaration
+enclosing `main` (Kotlin's top-level `fun main` in `Foo.kt` becomes `FooKt`); a
+file without a `main` is reported instead of guessing. Name `mainClass`
+explicitly to override.
+
+### Per-project configuration
+
+For anything more than "debug the open file" — arguments, VM flags, an explicit
+class, or attaching — use a project `.zed/debug.json`:
+
+```json
+[
+  {
+    "label": "Run app",
+    "adapter": "intellij_jvm",
+    "request": "launch",
+    "mainClass": "de.example.App",
+    "args": ["--profile=dev"],
+    "vmArgs": ["-Xmx1g"],
+    "stopOnEntry": false
+  },
+  {
+    "label": "Attach to JDWP on 5005",
+    "adapter": "intellij_jvm",
+    "request": "attach",
+    "port": 5005
+  }
+]
+```
+
+`debug_adapter_schemas/intellij_jvm.json` documents every accepted field and
+gives completions inside the file.
+
+### Why there is no gutter Debug button
+
+Zed draws the gutter Run/Test buttons from the *language* extension's
+`runnables.scm`, and only that extension's `debuggers` list decides which
+adapter a gutter Debug action uses. Debug locators (`[debug_locators.*]`) can
+convert tasks into scenarios, but Zed does not offer the entry-point run task to
+locators when a language extension already claims it — verified against
+`zed-extensions/java`: locators were consulted for `Test class …` / `Run tests`
+but never for `Run <class>`. Getting a per-entry-point Debug button would mean
+shipping our own `languages/java` + `languages/kotlin` (grammar, queries,
+`debuggers`) and asking users to uninstall the official extensions — trading
+upstream-maintained highlighting for a button. Hence: `F4` instead.
+
 ## Disclaimer
 
 This project is **not affiliated with, endorsed by, or sponsored by JetBrains
